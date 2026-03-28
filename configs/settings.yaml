@@ -1,0 +1,13 @@
+# configs/settings.yaml
+
+bot:
+  name: trading-bot-template
+  dry_run: true
+
+risk:
+  max_position_size_usd: 1000
+  max_risk_pct_per_trade: 0.01   # 1 %
+  max_open_trades: 3
+
+logging:
+  level: INFO
