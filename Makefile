@@ -11,16 +11,14 @@ test:
 	python -m pytest tests/ -v --tb=short
 
 lint:
-	ruff check src/ tests/
+	python -m ruff check src/ tests/ core/ chain/
 
 format:
-	ruff format src/ tests/
+	python -m ruff format src/ tests/ core/ chain/
 
 pre-commit-install:
 	python -m pre_commit install
 
 clean:
-	find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null; \
-	find . -type f -name "*.pyc" -delete 2>/dev/null; \
-	rm -rf .pytest_cache .ruff_cache; \
-	echo "cleaned"
+	python -c "import shutil, pathlib; [shutil.rmtree(p, ignore_errors=True) for p in ['.pytest_cache', '.ruff_cache']]; [p.unlink() for p in pathlib.Path('.').rglob('*.pyc')]"
+	@echo "cleaned"
