@@ -13,7 +13,7 @@ jobs:
 
     strategy:
       matrix:
-        python-version: ["3.11", "3.12"]
+        python-version: ["3.13"]
 
     steps:
       - name: Checkout
@@ -36,11 +36,11 @@ jobs:
 
       # ── Lint ──────────────────────────────────────────────────────────────
       - name: Lint (ruff)
-        run: ruff check core/ chain/ tests/
+        run: python -m ruff check core/ chain/ tests/
 
       - name: Format check (ruff)
-        run: ruff format --check core/ chain/ tests/
+        run: python -m ruff format --check core/ chain/ tests/
 
       # ── Tests ─────────────────────────────────────────────────────────────
       - name: Run tests
-        run: pytest tests/ -v --tb=short --cov=core --cov=chain --cov-report=term-missing
+        run: python -m pytest tests/ -v --tb=short --cov=core --cov=chain --cov-report=term-missing
