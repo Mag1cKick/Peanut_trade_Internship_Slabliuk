@@ -29,7 +29,7 @@ def main() -> int:
 
     # Run a fresh scan
     result = subprocess.run(
-        [sys.executable, "-m", "detect_secrets", "scan"],
+        [sys.executable, "-m", "detect_secrets", "scan", "--exclude-files", ".secrets.baseline"],
         capture_output=True,
         text=True,
     )

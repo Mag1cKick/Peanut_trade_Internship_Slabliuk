@@ -10,8 +10,6 @@ repos:
         language: system
         pass_filenames: false
         always_run: true
-        env:
-          PYTHONUTF8: "1"
 
   # ── Block .env files from being committed ────────────────────────────────
   - repo: https://github.com/pre-commit/pre-commit-hooks
