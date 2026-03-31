@@ -220,8 +220,10 @@ class ChainClient:
         """
         tx_hash = self._call_with_retry("send_raw_transaction", signed_tx)
         if hasattr(tx_hash, "hex"):
-            return tx_hash.hex()
-        return str(tx_hash)
+            result = tx_hash.hex()
+        else:
+            result = str(tx_hash)
+        return result if result.startswith("0x") else "0x" + result
 
     def wait_for_receipt(
         self,
@@ -254,7 +256,12 @@ class ChainClient:
         """
         Return parsed receipt or None if transaction is still pending.
         """
-        raw = self._call_with_retry("get_transaction_receipt", tx_hash)
+        try:
+            raw = self._call_with_retry("get_transaction_receipt", tx_hash)
+        except (RPCError, AllRPCsFailed) as exc:
+            if "not found" in str(exc).lower():
+                return None
+            raise
         if raw is None:
             return None
         return TransactionReceipt.from_web3(dict(raw))
@@ -262,7 +269,6 @@ class ChainClient:
     def call(self, tx: TransactionRequest, block: str = "latest") -> bytes:
         """
         Simulate a transaction via eth_call without broadcasting.
-        Useful for reading contract state or checking for reverts.
         """
         tx_dict = tx.to_dict()
         result = self._call_with_retry("call", tx_dict, block)
