@@ -88,7 +88,7 @@ class TestAddressConstruction:
 
     def test_no_0x_prefix_raises(self):
         with pytest.raises(ValueError):
-            Address("f39fd6e51aad88f6f4ce6ab8827279cfffb92266")
+            Address("f39fd6e51aad88f6f4ce6ab8827279cfffb92266")  # pragma: allowlist secret
 
     def test_non_string_raises_type_error(self):
         with pytest.raises(TypeError):

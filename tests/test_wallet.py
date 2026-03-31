@@ -208,7 +208,7 @@ class TestSignTypedData:
 class TestSignTransaction:
     # Minimal valid EIP-1559 transaction dict
     VALID_TX = {
-        "to": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+        "to": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",  # pragma: allowlist secret
         "nonce": 0,
         "gas": 21000,
         "chainId": 1,
