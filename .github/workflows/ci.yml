@@ -30,27 +30,17 @@ jobs:
           pip install -r requirements.txt
           pip install -r requirements-dev.txt
 
-      # ── Secrets check ────────────────────────────────────────────────────
+      # ── Secrets check ─────────────────────────────────────────────────────
       - name: Check for accidentally committed secrets
-        run: |
-          if grep -rE "(API_KEY|API_SECRET|PRIVATE_KEY)\s*=\s*['\"][^'\"]{8,}" src/ tests/ configs/ --include="*.py" --include="*.yaml" --include="*.json"; then
-            echo "❌  Possible hardcoded secret detected. Use environment variables."
-            exit 1
-          fi
-          echo "✅  No hardcoded secrets found."
+        run: python scripts/check_secrets_baseline.py
 
-      # ── Lint ─────────────────────────────────────────────────────────────
+      # ── Lint ──────────────────────────────────────────────────────────────
       - name: Lint (ruff)
-        run: ruff check src/ tests/
+        run: ruff check core/ chain/ tests/
 
       - name: Format check (ruff)
-        run: ruff format --check src/ tests/
+        run: ruff format --check core/ chain/ tests/
 
       # ── Tests ─────────────────────────────────────────────────────────────
       - name: Run tests
-        run: pytest tests/ -v --tb=short --cov=src --cov-report=term-missing
-        env:
-          # Provide dummy env vars so the bot initialises without real secrets
-          API_KEY: ${{ secrets.API_KEY || 'ci-placeholder' }}
-          API_SECRET: ${{ secrets.API_SECRET || 'ci-placeholder' }}
-          ENVIRONMENT: ci
+        run: pytest tests/ -v --tb=short --cov=core --cov=chain --cov-report=term-missing
