@@ -1,10 +1,17 @@
 repos:
-  - repo: https://github.com/Yelp/detect-secrets
-    rev: v1.4.0
+  # ── Detect secrets before they ever reach Git ────────────────────────────
+  # Uses a local Python script for Windows compatibility — avoids the
+  # detect-secrets-hook.exe path/version issues on Windows.
+  - repo: local
     hooks:
       - id: detect-secrets
-        exclude: .secrets.baseline
+        name: detect-secrets
+        entry: python scripts/check_secrets_baseline.py
+        language: system
+        pass_filenames: false
+        always_run: true
 
+  # ── Block .env files from being committed ────────────────────────────────
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.6.0
     hooks:
@@ -16,6 +23,7 @@ repos:
       - id: no-commit-to-branch
         args: ["--branch", "main"]
 
+  # ── Lint & format with ruff ───────────────────────────────────────────────
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.4.4
     hooks:
@@ -23,6 +31,7 @@ repos:
         args: ["--fix"]
       - id: ruff-format
 
+  # ── Tests must pass before every commit ──────────────────────────────────
   - repo: local
     hooks:
       - id: pytest
