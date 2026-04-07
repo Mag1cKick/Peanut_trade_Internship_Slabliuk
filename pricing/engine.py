@@ -73,9 +73,14 @@ class PricingEngine:
         ws_url:       WebSocket endpoint for mempool subscriptions.
     """
 
-    def __init__(self, chain_client, fork_url: str, ws_url: str) -> None:
+    def __init__(
+        self,
+        chain_client,
+        fork_simulator: ForkSimulator,
+        ws_url: str,
+    ) -> None:
         self.client = chain_client
-        self.simulator = ForkSimulator(fork_url)
+        self.simulator = fork_simulator
         self.monitor = MempoolMonitor(ws_url, self._on_mempool_swap)
         self.pools: dict[Address, UniswapV2Pair] = {}
         self.router: RouteFinder | None = None

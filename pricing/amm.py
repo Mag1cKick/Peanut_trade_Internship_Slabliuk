@@ -1,5 +1,6 @@
 """
 pricing/amm.py — Uniswap V2 AMM math and pair representation.
+
 """
 
 from __future__ import annotations

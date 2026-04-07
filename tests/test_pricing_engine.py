@@ -145,37 +145,32 @@ class TestQuoteError:
 
 
 class TestPricingEngineInit:
-    def test_init_creates_components(self):
+    def test_init_stores_injected_simulator(self):
+        """ForkSimulator is now injected (DIP) — PricingEngine stores it as-is."""
         mock_client = MagicMock()
-        with (
-            patch("pricing.engine.ForkSimulator") as MockFork,
-            patch("pricing.engine.MempoolMonitor") as MockMonitor,
-        ):
-            PricingEngine(mock_client, "http://localhost:8545", "wss://fake")
-        MockFork.assert_called_once_with("http://localhost:8545")
-        MockMonitor.assert_called_once()
+        mock_sim = MagicMock()
+        with patch("pricing.engine.MempoolMonitor"):
+            engine = PricingEngine(mock_client, mock_sim, "wss://fake")
+        assert engine.simulator is mock_sim
 
     def test_monitor_callback_is_on_mempool_swap(self):
         mock_client = MagicMock()
-        with (
-            patch("pricing.engine.ForkSimulator"),
-            patch("pricing.engine.MempoolMonitor") as MockMonitor,
-        ):
-            PricingEngine(mock_client, "http://localhost:8545", "wss://fake")
+        with patch("pricing.engine.MempoolMonitor") as MockMonitor:
+            PricingEngine(mock_client, MagicMock(), "wss://fake")
         callback = MockMonitor.call_args[0][1]
         assert callable(callback)
 
     def test_pools_initially_empty(self):
         mock_client = MagicMock()
-        with patch("pricing.engine.ForkSimulator"), patch("pricing.engine.MempoolMonitor"):
-            engine = PricingEngine(mock_client, "http://localhost:8545", "wss://fake")
+        with patch("pricing.engine.MempoolMonitor"):
+            engine = PricingEngine(mock_client, MagicMock(), "wss://fake")
         assert engine.pools == {}
         assert engine.router is None
 
     def test_pending_swaps_initially_empty(self):
         mock_client = MagicMock()
-        with patch("pricing.engine.ForkSimulator"), patch("pricing.engine.MempoolMonitor"):
-            engine = PricingEngine(mock_client, "http://localhost:8545", "wss://fake")
+        with patch("pricing.engine.MempoolMonitor"):
+            engine = PricingEngine(mock_client, MagicMock(), "wss://fake")
         assert engine.pending_swaps == []
 
 

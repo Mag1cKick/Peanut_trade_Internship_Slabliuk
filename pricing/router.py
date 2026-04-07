@@ -1,5 +1,9 @@
 """
-pricing/router.py — Multi-hop route discovery and comparison for Uniswap V2 pairs.
+pricing/router.py — Multi-hop route discovery and comparison for any AMMPool.
+
+OCP / LSP: Route and RouteFinder depend on the AMMPool protocol, not on a
+concrete UniswapV2Pair.  Adding V3 pool support requires zero changes here —
+pass any pool that satisfies pricing.protocols.AMMPool.
 """
 
 from __future__ import annotations
@@ -7,7 +11,7 @@ from __future__ import annotations
 from collections import defaultdict
 
 from core.types import Token
-from pricing.amm import UniswapV2Pair
+from pricing.protocols import AMMPool
 
 _GAS_BASE = 150_000
 _GAS_PER_HOP = 100_000
@@ -15,10 +19,13 @@ _GAS_PER_HOP = 100_000
 
 class Route:
     """
-    A sequence of Uniswap V2 pools that routes token_in → token_out.
+    A sequence of AMM pools that routes token_in → token_out.
+
+    Accepts any pool conforming to :class:`~pricing.protocols.AMMPool` —
+    V2, V3, or custom implementations can be mixed freely.
     """
 
-    def __init__(self, pools: list[UniswapV2Pair], path: list[Token]) -> None:
+    def __init__(self, pools: list[AMMPool], path: list[Token]) -> None:
         if len(path) != len(pools) + 1:
             raise ValueError(
                 f"path length must be len(pools) + 1, "
@@ -70,13 +77,13 @@ class RouteFinder:
     Discovers and compares all routes between two tokens across a pool set.
     """
 
-    def __init__(self, pools: list[UniswapV2Pair]) -> None:
+    def __init__(self, pools: list[AMMPool]) -> None:
         self.pools = pools
         self.graph = self._build_graph()
 
-    def _build_graph(self) -> dict[Token, list[tuple[UniswapV2Pair, Token]]]:
+    def _build_graph(self) -> dict[Token, list[tuple[AMMPool, Token]]]:
         """Build adjacency map: token → [(pool, other_token), ...]."""
-        graph: dict[Token, list[tuple[UniswapV2Pair, Token]]] = defaultdict(list)
+        graph: dict[Token, list[tuple[AMMPool, Token]]] = defaultdict(list)
         for pool in self.pools:
             graph[pool.token0].append((pool, pool.token1))
             graph[pool.token1].append((pool, pool.token0))
@@ -111,7 +118,7 @@ class RouteFinder:
         max_hops: int,
         visited_tokens: set[Token],
         visited_pools: set[int],
-        pools_so_far: list[UniswapV2Pair],
+        pools_so_far: list[AMMPool],
         path_so_far: list[Token],
         routes: list[Route],
     ) -> None:
