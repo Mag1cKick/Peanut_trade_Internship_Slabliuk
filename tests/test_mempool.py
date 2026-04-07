@@ -482,5 +482,105 @@ class TestMempoolMonitorStart:
         messages = [self._build_message(h) for h in hashes]
 
         await self._run_start_with_messages(monitor, messages, txs)
-
         assert len(received) == 3
+
+
+# ── parse_transaction edge cases ──────────────────────────────────────────────
+
+
+class TestParseTransactionEdgeCases:
+    """Cover branches not hit by the main parse tests."""
+
+    def setup_method(self):
+        self.monitor = MempoolMonitor("wss://fake", callback=lambda s: None)
+
+    def test_tx_hash_bytes_converted_to_hex(self):
+        """When tx['hash'] is bytes, it should be converted to '0x...' string."""
+        raw_bytes_hash = bytes.fromhex("ab" * 32)
+        tx = _make_tx(input_data=_tokens_for_tokens_hex())
+        tx["hash"] = raw_bytes_hash
+
+        result = self.monitor.parse_transaction(tx)
+        assert result is not None
+        assert result.tx_hash == "0x" + "ab" * 32
+
+    def test_decode_swap_params_unhandled_selector_raises(self):
+        """decode_swap_params with an unknown selector should raise ValueError."""
+        monitor = MempoolMonitor("wss://fake", callback=lambda s: None)
+        with pytest.raises(ValueError, match="selector"):
+            monitor.decode_swap_params("0xdeadbeef", b"\x00" * 64)
+
+    def test_invalid_hex_after_selector_returns_none(self):
+        """Covers mempool.py:158-159 — invalid hex in calldata raises ValueError → returns None."""
+        # Valid selector but non-hex chars after it
+        bad_input = "0x38ed1739" + "GG" * 10
+        tx = _make_tx(input_data=bad_input)
+        result = self.monitor.parse_transaction(tx)
+        assert result is None
+
+    def test_invalid_sender_address_returns_none(self):
+        """Covers mempool.py:200-202 — Address() raises on bad sender → returns None."""
+        tx = _make_tx(input_data=_tokens_for_tokens_hex())
+        tx["from"] = "not-an-address"  # triggers Address() ValueError in ParsedSwap ctor
+        result = self.monitor.parse_transaction(tx)
+        assert result is None
+
+
+# ── TestListenBranches ─────────────────────────────────────────────────────────
+
+
+class TestListenBranches:
+    """Cover lines 116 (result is None) and 118 (bytes result) in _listen."""
+
+    async def _run_with_messages(self, messages, tx_by_hash):
+        received = []
+        monitor = MempoolMonitor("wss://fake", callback=received.append)
+
+        async def fake_subscriptions():
+            for msg in messages:
+                yield msg
+
+        mock_w3 = MagicMock()
+        mock_w3.eth.subscribe = AsyncMock()
+        mock_w3.eth.get_transaction = AsyncMock(side_effect=lambda h: tx_by_hash.get(h))
+        mock_w3.socket.process_subscriptions = fake_subscriptions
+
+        mock_ctx = MagicMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=mock_w3)
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("pricing.mempool.AsyncWeb3", return_value=mock_ctx):
+            await monitor.start()
+            await asyncio.gather(
+                *[t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+            )
+        return received
+
+    @pytest.mark.asyncio
+    async def test_none_result_message_skipped(self):
+        """Covers mempool.py:116 — message with no result is skipped silently."""
+        tx_hash = "0xgood"
+        good_tx = _make_tx(input_data=_tokens_for_tokens_hex())
+        good_tx["hash"] = tx_hash
+
+        # First message has no result (hits line 116 continue), second is valid
+        messages = [
+            {},  # result = None → skipped
+            {"params": {"result": tx_hash}},  # valid
+        ]
+        received = await self._run_with_messages(messages, {tx_hash: good_tx})
+        assert len(received) == 1
+
+    @pytest.mark.asyncio
+    async def test_bytes_tx_hash_converted(self):
+        """Covers mempool.py:118 — bytes result is converted to hex string."""
+        tx_hash_bytes = bytes.fromhex("ab" * 32)
+        tx_hash_str = "0x" + "ab" * 32
+        good_tx = _make_tx(input_data=_tokens_for_tokens_hex())
+        good_tx["hash"] = tx_hash_str
+
+        # result is bytes directly in the message top-level
+        messages = [{"result": tx_hash_bytes}]
+        received = await self._run_with_messages(messages, {tx_hash_str: good_tx})
+        assert len(received) == 1
+        assert received[0].tx_hash == tx_hash_str

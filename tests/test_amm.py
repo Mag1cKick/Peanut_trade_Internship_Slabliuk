@@ -399,6 +399,17 @@ class TestGetAmountIn:
                 actual_out >= desired
             ), f"amount_in={required} produced {actual_out} < desired {desired}"
 
+    def test_get_amount_in_with_token1_as_output(self, eth_usdc_pair):
+        """Covers amm.py:138 — token_out == token1 branch in get_amount_in."""
+        # Buying USDC (token1), paying with WETH (token0)
+        usdc_want = 500 * 10**6  # 500 USDC
+        weth_needed = eth_usdc_pair.get_amount_in(usdc_want, USDC)
+        assert isinstance(weth_needed, int)
+        assert weth_needed > 0
+        # Verify round-trip: swapping weth_needed gets at least usdc_want USDC
+        actual_out = eth_usdc_pair.get_amount_out(weth_needed, WETH)
+        assert actual_out >= usdc_want
+
 
 # ── 4. get_spot_price ─────────────────────────────────────────────────────────
 
@@ -669,3 +680,72 @@ class TestFromChain:
             pair = UniswapV2Pair.from_chain(PAIR_ADDR, client)
 
         assert pair.address == PAIR_ADDR
+
+    def test_fetch_token_fallback_on_rpc_error(self):
+        """When symbol()/decimals() call fails, _fetch_token uses address fallback."""
+        from pricing.amm import _fetch_token
+
+        mock_w3 = MagicMock()
+        mock_contract = MagicMock()
+        mock_contract.functions.symbol.return_value.call.side_effect = Exception("revert")
+        mock_contract.functions.decimals.return_value.call.side_effect = Exception("revert")
+        mock_w3.eth.contract.return_value = mock_contract
+
+        with patch("web3.Web3.to_checksum_address", side_effect=lambda x: x):
+            token = _fetch_token(mock_w3, "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
+
+        # Fallback: symbol is a truncated address, decimals default to 18
+        assert token.decimals == 18
+        assert len(token.symbol) > 0
+
+
+# ── 9. Edge cases for execution_price and price_impact ────────────────────────
+
+
+class TestExecutionPriceAndPriceImpactEdgeCases:
+    """Cover zero-output and zero-spot branches."""
+
+    def _pair_with_tiny_reserves(self) -> UniswapV2Pair:
+        """Extremely small reserves so a large trade gives 0 output."""
+        return UniswapV2Pair(
+            address=PAIR_ADDR,
+            token0=WETH,
+            token1=USDC,
+            reserve0=1,
+            reserve1=1,
+            fee_bps=30,
+        )
+
+    def test_get_execution_price_zero_when_output_is_zero(self):
+        """If a vanishingly small pair returns 0 output, execution_price = 0."""
+        pair = UniswapV2Pair(
+            address=PAIR_ADDR,
+            token0=WETH,
+            token1=USDC,
+            reserve0=1,
+            reserve1=1,
+            fee_bps=9999,  # near-100 % fee → amount_in_with_fee ≈ 0
+        )
+        # With reserve0=1, reserve1=1, fee_bps=9999:
+        # amount_in_with_fee = 1 * (10000 - 9999) = 1
+        # numerator = 1 * 1 = 1; denominator = 10000 + 1 = 10001
+        # get_amount_out = 1 // 10001 = 0
+        amount_out = pair.get_amount_out(1, WETH)
+        if amount_out == 0:
+            price = pair.get_execution_price(1, WETH)
+            assert price == Decimal(0)
+
+    def test_get_price_impact_zero_when_spot_is_zero(self):
+        """Branch: if spot == 0, return Decimal(0)."""
+        pair = UniswapV2Pair(
+            address=PAIR_ADDR,
+            token0=WETH,
+            token1=USDC,
+            reserve0=10**18,
+            reserve1=2000 * 10**6,
+            fee_bps=30,
+        )
+        # Monkeypatch get_spot_price to return 0 to hit the guard
+        with patch.object(pair, "get_spot_price", return_value=Decimal(0)):
+            impact = pair.get_price_impact(10**18, WETH)
+        assert impact == Decimal(0)

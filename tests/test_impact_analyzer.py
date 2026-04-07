@@ -14,7 +14,7 @@ Test groups:
 from __future__ import annotations
 
 from decimal import Decimal
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -478,3 +478,98 @@ class TestSpotPriceHuman:
         p_weth_in = _spot_price_human(eth_usdc_pair, WETH, USDC)  # ~0.0005
         product = p_usdc_in * p_weth_in
         assert abs(product - Decimal("1")) < Decimal("0.0001")
+
+    def test_zero_spot_price_returns_zero(self, eth_usdc_pair):
+        """Branch: if out_per_in_human == 0, return Decimal(0)."""
+        with patch.object(eth_usdc_pair, "get_spot_price", return_value=Decimal(0)):
+            price = _spot_price_human(eth_usdc_pair, USDC, WETH)
+        assert price == Decimal(0)
+
+
+# ── 7. _resolve_token helper ──────────────────────────────────────────────────
+
+
+class TestResolveToken:
+    def test_resolve_by_symbol_token0(self, eth_usdc_pair):
+        """Token0 (WETH) found by symbol match — covers impact_analyzer.py:207."""
+        from pricing.impact_analyzer import _resolve_token
+
+        token = _resolve_token(eth_usdc_pair, "WETH")
+        assert token.symbol == "WETH"
+
+    def test_resolve_by_address(self, eth_usdc_pair):
+        """Token can be looked up by its raw address string."""
+        from pricing.impact_analyzer import _resolve_token
+
+        token = _resolve_token(eth_usdc_pair, "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")
+        assert token.symbol == "USDC"
+
+    def test_resolve_by_address_token1(self, eth_usdc_pair):
+        """Token1 (USDC) found by address match."""
+        from pricing.impact_analyzer import _resolve_token
+
+        token = _resolve_token(eth_usdc_pair, "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
+        assert token.symbol == "WETH"
+
+    def test_invalid_token_raises(self, eth_usdc_pair):
+        """Neither symbol nor address match → ValueError."""
+        from pricing.impact_analyzer import _resolve_token
+
+        with pytest.raises(ValueError, match="not found"):
+            _resolve_token(eth_usdc_pair, "UNKNOWN")
+
+
+# ── 8. Additional CLI error paths ─────────────────────────────────────────────
+
+
+class TestCLIAdditionalErrors:
+    def _mock_pair(self):
+        return UniswapV2Pair(
+            address=PAIR_ADDR,
+            token0=WETH,
+            token1=USDC,
+            reserve0=1_000 * 10**18,
+            reserve1=2_000_000 * 10**6,
+            fee_bps=30,
+        )
+
+    def test_invalid_sizes_exits_1(self):
+        """Non-numeric --sizes should exit with code 1."""
+        with (
+            patch("pricing.impact_analyzer.UniswapV2Pair") as mock_cls,
+            patch("pricing.impact_analyzer.ChainClient"),
+        ):
+            mock_cls.from_chain.return_value = self._mock_pair()
+            exit_code = main(
+                [
+                    PAIR_ADDR.checksum,
+                    "--token-in",
+                    "USDC",
+                    "--sizes",
+                    "not,numbers",
+                ]
+            )
+        assert exit_code == 1
+
+    def test_generate_table_exception_exits_1(self):
+        """If generate_impact_table or find_max_size_for_impact raises, exit 1."""
+        with (
+            patch("pricing.impact_analyzer.UniswapV2Pair") as mock_cls,
+            patch("pricing.impact_analyzer.ChainClient"),
+            patch("pricing.impact_analyzer.PriceImpactAnalyzer") as mock_analyzer_cls,
+        ):
+            mock_cls.from_chain.return_value = self._mock_pair()
+            mock_analyzer = MagicMock()
+            mock_analyzer.generate_impact_table.side_effect = RuntimeError("boom")
+            mock_analyzer_cls.return_value = mock_analyzer
+
+            exit_code = main(
+                [
+                    PAIR_ADDR.checksum,
+                    "--token-in",
+                    "USDC",
+                    "--sizes",
+                    "1000",
+                ]
+            )
+        assert exit_code == 1
