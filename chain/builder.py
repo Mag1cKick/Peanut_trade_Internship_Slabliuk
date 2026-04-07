@@ -5,6 +5,7 @@ chain/builder.py — Fluent builder for constructing and sending transactions.
 from __future__ import annotations
 
 import logging
+import threading
 from typing import TYPE_CHECKING
 
 from core.types import Address, TokenAmount, TransactionReceipt, TransactionRequest
@@ -248,3 +249,75 @@ class TransactionBuilder:
             max_priority_fee=self._max_priority_fee,
             chain_id=self._chain_id,
         )
+
+
+class NonceManager:
+    """
+    Thread-safe nonce manager for concurrent transaction submission.
+
+    Fetches the current nonce from the chain once, then tracks it locally
+    so multiple transactions can be prepared and sent without waiting for
+    each confirmation.
+
+    Usage:
+        nm = NonceManager(client, Address("0x..."))
+        tx1 = builder.nonce(nm.get_next()).build_and_sign()
+        tx2 = builder.nonce(nm.get_next()).build_and_sign()
+        # Both can be broadcast immediately — nonces are sequential and unique.
+
+        # After a reorg or stuck transaction, re-sync with the chain:
+        nm.sync()
+    """
+
+    def __init__(self, client: ChainClient, address: Address) -> None:
+        self._client = client
+        self._address = address
+        self._lock = threading.Lock()
+        self._nonce: int | None = None
+
+    def _ensure_initialized(self) -> None:
+        """Fetch nonce from chain on first access."""
+        if self._nonce is None:
+            self._nonce = self._client.get_nonce(self._address)
+
+    def get_next(self) -> int:
+        """
+        Atomically return the next nonce and increment the local counter.
+
+        The first call fetches from the chain; subsequent calls increment locally.
+        """
+        with self._lock:
+            self._ensure_initialized()
+            nonce = self._nonce
+            self._nonce += 1  # type: ignore[operator]
+            return nonce  # type: ignore[return-value]
+
+    def peek(self) -> int:
+        """Return the current nonce without incrementing."""
+        with self._lock:
+            self._ensure_initialized()
+            return self._nonce  # type: ignore[return-value]
+
+    def sync(self) -> None:
+        """
+        Re-fetch the nonce from the chain.
+
+        Use this after a reorg, a stuck transaction, or any situation where the
+        local counter may have drifted from on-chain state.
+        """
+        with self._lock:
+            self._nonce = self._client.get_nonce(self._address)
+
+    def reset(self, nonce: int) -> None:
+        """
+        Manually override the local nonce counter.
+
+        Args:
+            nonce: Non-negative integer to set as the next nonce.
+
+        Use with caution — setting an incorrect value will cause transaction failures.
+        """
+        if not isinstance(nonce, int) or nonce < 0:
+            raise ValueError(f"nonce must be a non-negative int, got {nonce!r}.")
+        with self._lock:
+            self._nonce = nonce

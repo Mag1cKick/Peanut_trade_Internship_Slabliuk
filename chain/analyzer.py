@@ -386,6 +386,21 @@ def format_text(analysis: dict) -> str:
     if revert:
         lines += ["", "Revert Reason", "-------------", revert]
 
+    mev = a.get("mev")
+    if mev:
+        lines += ["", "MEV Analysis", "------------"]
+        lines.append(f"Risk Level:     {mev['risk_level'].upper()}")
+        if mev["signals"]:
+            lines.append(f"Signals:        {', '.join(mev['signals'])}")
+        else:
+            lines.append("Signals:        none")
+        lines.append(f"Note:           {mev['note']}")
+
+    trace = a.get("trace")
+    if trace:
+        lines += ["", "Call Trace", "----------"]
+        lines.extend(_format_trace(trace))
+
     lines.append("")
     return "\n".join(lines)
 
@@ -466,6 +481,131 @@ def analyze(tx_hash: str, rpc_url: str) -> dict:
     return result
 
 
+def get_trace(tx_hash: str, rpc_url: str) -> dict:
+    """
+    Fetch the internal call trace for a transaction via debug_traceTransaction.
+
+    Returns a structured call tree (type, from, to, value, input, calls).
+    Not all nodes support this method — requires debug APIs enabled
+    (e.g., Alchemy Archive, self-hosted geth/erigon with --http.api=eth,debug).
+
+    Args:
+        tx_hash: 32-byte hex transaction hash (0x...).
+        rpc_url: HTTP(S) RPC URL of a node with debug APIs.
+
+    Raises:
+        ValueError: If tx_hash format is invalid.
+        RuntimeError: If the node rejects the request or returns an error.
+    """
+    if not tx_hash.startswith("0x") or len(tx_hash) != 66:
+        raise ValueError(
+            f"Invalid transaction hash: {tx_hash!r}. "
+            "Expected a 32-byte hex string starting with '0x' (66 chars total)."
+        )
+
+    w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": 60}))
+    try:
+        response = w3.provider.make_request(
+            "debug_traceTransaction",
+            [tx_hash, {"tracer": "callTracer"}],
+        )
+    except Exception as exc:
+        raise RuntimeError(f"Trace request failed for {tx_hash}: {exc}") from exc
+
+    if "error" in response:
+        err = response["error"]
+        msg = err.get("message", str(err)) if isinstance(err, dict) else str(err)
+        raise RuntimeError(f"Trace unavailable for {tx_hash}: {msg}")
+
+    return dict(response.get("result", {}))
+
+
+def detect_mev_signals(analysis: dict) -> dict:
+    """
+    Analyze a transaction for MEV (Maximal Extractable Value) signals.
+
+    Applies single-transaction heuristics. Block-level sandwich detection
+    requires comparing with adjacent transactions (not done here).
+
+    Heuristics:
+    - high_effective_gas_price: effective price > 100 gwei (competitive bidding)
+    - multiple_swaps: >= 2 swap events (complex routing or sandwich bot)
+    - zero_value_swap: zero ETH value + contract call + swap (possible arb/frontrun)
+    - high_gas_swap: gas limit > 500k with swap activity (complex multi-hop)
+
+    Returns:
+        dict with keys:
+          signals (list[str]): triggered heuristic names
+          risk_level (str): "none" | "low" | "medium" | "high"
+          note (str): disclaimer
+    """
+    signals: list[str] = []
+    receipt = analysis.get("receipt") or {}
+    tx = analysis.get("transaction") or {}
+    events = analysis.get("events") or {}
+
+    effective_gas_price: int = receipt.get("effective_gas_price", 0)
+    swaps: list = events.get("swaps", [])
+    value: int = tx.get("value", 0)
+    input_data = tx.get("input", "0x")
+    gas_limit: int = tx.get("gas", 0)
+
+    if effective_gas_price > 100 * 10**9:
+        signals.append("high_effective_gas_price")
+
+    if len(swaps) >= 2:
+        signals.append("multiple_swaps")
+
+    is_contract_call = input_data not in ("0x", "", b"")
+    if value == 0 and is_contract_call and len(swaps) >= 1:
+        signals.append("zero_value_swap")
+
+    if gas_limit > 500_000 and len(swaps) >= 1:
+        signals.append("high_gas_swap")
+
+    n = len(signals)
+    if n >= 3:
+        risk_level = "high"
+    elif n == 2:
+        risk_level = "medium"
+    elif n == 1:
+        risk_level = "low"
+    else:
+        risk_level = "none"
+
+    return {
+        "signals": signals,
+        "risk_level": risk_level,
+        "note": (
+            "MEV detection is heuristic-only. "
+            "False positives are possible for legitimate aggregators and complex DeFi."
+        ),
+    }
+
+
+def _format_trace(trace: dict, indent: int = 0) -> list[str]:
+    """Recursively render a callTracer trace tree as indented lines."""
+    lines = []
+    prefix = "  " * indent
+    call_type = trace.get("type", "CALL")
+    from_addr = _short(trace.get("from", ""))
+    to_addr = _short(trace.get("to", ""))
+    value_wei = int(trace.get("value", "0x0") or "0x0", 16)
+    gas_used = trace.get("gasUsed", "0x0")
+    error = trace.get("error", "")
+
+    line = f"{prefix}{call_type}  {from_addr} → {to_addr}  value={_eth(value_wei)} ETH"
+    if gas_used:
+        line += f"  gasUsed={int(gas_used, 16):,}"
+    if error:
+        line += f"  ❌ {error}"
+    lines.append(line)
+
+    for sub in trace.get("calls", []):
+        lines.extend(_format_trace(sub, indent + 1))
+    return lines
+
+
 DEFAULT_RPC = "https://eth-mainnet.g.alchemy.com/v2/demo"
 
 
@@ -486,6 +626,16 @@ def main(argv: list[str] | None = None) -> int:
         default="text",
         help="Output format (default: text)",
     )
+    parser.add_argument(
+        "--trace",
+        action="store_true",
+        help="Include internal call trace via debug_traceTransaction (requires debug API)",
+    )
+    parser.add_argument(
+        "--mev",
+        action="store_true",
+        help="Include MEV signal analysis",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -496,6 +646,15 @@ def main(argv: list[str] | None = None) -> int:
     except RuntimeError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
+
+    if args.mev:
+        analysis["mev"] = detect_mev_signals(analysis)
+
+    if args.trace:
+        try:
+            analysis["trace"] = get_trace(args.tx_hash, args.rpc)
+        except RuntimeError as exc:
+            print(f"Warning: trace unavailable — {exc}", file=sys.stderr)
 
     if args.format == "json":
 

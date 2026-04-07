@@ -23,7 +23,7 @@ Test groups:
 from __future__ import annotations
 
 from decimal import Decimal
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -528,3 +528,114 @@ class TestErrorClassification:
         err = AllRPCsFailed(errors)
         assert len(err.errors) == 2
         assert "a" in str(err)
+
+
+# ── 14. WebSocket subscription (stretch goal) ─────────────────────────────────
+
+
+class TestSubscribePendingTransactions:
+    """Tests for ChainClient.subscribe_pending_transactions (async generator)."""
+
+    @pytest.mark.asyncio
+    async def test_yields_transaction_hashes(self, client):
+        """Subscription should yield each tx hash from the WebSocket messages."""
+
+        hashes = ["0x" + "aa" * 32, "0x" + "bb" * 32]
+
+        async def mock_process_subscriptions():
+            for h in hashes:
+                yield {"result": h}
+
+        mock_w3 = MagicMock()
+        mock_w3.eth.subscribe = AsyncMock(return_value="sub-id")
+        mock_w3.socket.process_subscriptions = mock_process_subscriptions
+        mock_w3.__aenter__ = AsyncMock(return_value=mock_w3)
+        mock_w3.__aexit__ = AsyncMock(return_value=None)
+
+        mock_async_web3_cls = MagicMock()
+        mock_async_web3_cls.return_value = mock_w3
+        mock_async_web3_cls.WebSocketProvider = MagicMock()
+
+        with patch("chain.client.AsyncWeb3", mock_async_web3_cls, create=True):
+            collected = []
+            async for tx_hash in client.subscribe_pending_transactions("wss://example.com"):
+                collected.append(tx_hash)
+
+        assert collected == hashes
+
+    @pytest.mark.asyncio
+    async def test_bytes_hash_converted_to_hex_string(self, client):
+        """Bytes results should be converted to 0x-prefixed hex strings."""
+        raw_bytes = bytes.fromhex("ab" * 32)
+
+        async def mock_process_subscriptions():
+            yield {"result": raw_bytes}
+
+        mock_w3 = MagicMock()
+        mock_w3.eth.subscribe = AsyncMock(return_value="sub-id")
+        mock_w3.socket.process_subscriptions = mock_process_subscriptions
+        mock_w3.__aenter__ = AsyncMock(return_value=mock_w3)
+        mock_w3.__aexit__ = AsyncMock(return_value=None)
+
+        mock_async_web3_cls = MagicMock()
+        mock_async_web3_cls.return_value = mock_w3
+        mock_async_web3_cls.WebSocketProvider = MagicMock()
+
+        with patch("chain.client.AsyncWeb3", mock_async_web3_cls, create=True):
+            collected = []
+            async for tx_hash in client.subscribe_pending_transactions("wss://example.com"):
+                collected.append(tx_hash)
+
+        assert len(collected) == 1
+        assert collected[0] == "0x" + "ab" * 32
+
+    @pytest.mark.asyncio
+    async def test_empty_subscription_yields_nothing(self, client):
+        """No messages → no yielded hashes."""
+
+        async def mock_process_subscriptions():
+            return
+            yield  # make it an async generator
+
+        mock_w3 = MagicMock()
+        mock_w3.eth.subscribe = AsyncMock(return_value="sub-id")
+        mock_w3.socket.process_subscriptions = mock_process_subscriptions
+        mock_w3.__aenter__ = AsyncMock(return_value=mock_w3)
+        mock_w3.__aexit__ = AsyncMock(return_value=None)
+
+        mock_async_web3_cls = MagicMock()
+        mock_async_web3_cls.return_value = mock_w3
+        mock_async_web3_cls.WebSocketProvider = MagicMock()
+
+        with patch("chain.client.AsyncWeb3", mock_async_web3_cls, create=True):
+            collected = []
+            async for tx_hash in client.subscribe_pending_transactions("wss://example.com"):
+                collected.append(tx_hash)
+
+        assert collected == []
+
+    @pytest.mark.asyncio
+    async def test_messages_with_none_result_skipped(self, client):
+        """Messages with None result should be silently skipped."""
+
+        async def mock_process_subscriptions():
+            yield {"result": None}
+            yield {"result": "0x" + "cc" * 32}
+
+        mock_w3 = MagicMock()
+        mock_w3.eth.subscribe = AsyncMock(return_value="sub-id")
+        mock_w3.socket.process_subscriptions = mock_process_subscriptions
+        mock_w3.__aenter__ = AsyncMock(return_value=mock_w3)
+        mock_w3.__aexit__ = AsyncMock(return_value=None)
+
+        mock_async_web3_cls = MagicMock()
+        mock_async_web3_cls.return_value = mock_w3
+        mock_async_web3_cls.WebSocketProvider = MagicMock()
+
+        with patch("chain.client.AsyncWeb3", mock_async_web3_cls, create=True):
+            collected = []
+            async for tx_hash in client.subscribe_pending_transactions("wss://example.com"):
+                collected.append(tx_hash)
+
+        assert len(collected) == 1
+        assert collected[0] == "0x" + "cc" * 32
