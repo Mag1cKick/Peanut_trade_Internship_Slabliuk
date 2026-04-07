@@ -18,11 +18,12 @@ Test groups:
 
 from __future__ import annotations
 
+import threading
 from unittest.mock import MagicMock
 
 import pytest
 
-from chain.builder import TransactionBuilder
+from chain.builder import NonceManager, TransactionBuilder
 from chain.client import GasPrice
 from chain.errors import TransactionFailed, TransactionTimeout
 from core.types import Address, TokenAmount, TransactionReceipt, TransactionRequest
@@ -482,3 +483,97 @@ class TestFullChain:
         full_builder.with_gas_estimate(buffer=1.2).gas_limit(99999)
         tx = full_builder.build()
         assert tx.gas_limit == 99999
+
+
+# ── 11. NonceManager (stretch goal) ──────────────────────────────────────────
+
+
+class TestNonceManager:
+    def test_get_next_initializes_from_chain(self, mock_client, address_a):
+        mock_client.get_nonce.return_value = 5
+        nm = NonceManager(mock_client, address_a)
+        assert nm.get_next() == 5
+
+    def test_get_next_increments_locally(self, mock_client, address_a):
+        mock_client.get_nonce.return_value = 10
+        nm = NonceManager(mock_client, address_a)
+        assert nm.get_next() == 10
+        assert nm.get_next() == 11
+        assert nm.get_next() == 12
+
+    def test_get_next_fetches_chain_only_once(self, mock_client, address_a):
+        mock_client.get_nonce.return_value = 3
+        nm = NonceManager(mock_client, address_a)
+        nm.get_next()
+        nm.get_next()
+        nm.get_next()
+        mock_client.get_nonce.assert_called_once()
+
+    def test_peek_returns_current_nonce(self, mock_client, address_a):
+        mock_client.get_nonce.return_value = 7
+        nm = NonceManager(mock_client, address_a)
+        assert nm.peek() == 7
+        assert nm.peek() == 7  # does not increment
+
+    def test_peek_does_not_increment(self, mock_client, address_a):
+        mock_client.get_nonce.return_value = 7
+        nm = NonceManager(mock_client, address_a)
+        nm.peek()
+        nm.peek()
+        assert nm.get_next() == 7  # still 7
+
+    def test_sync_refetches_from_chain(self, mock_client, address_a):
+        mock_client.get_nonce.side_effect = [5, 20]
+        nm = NonceManager(mock_client, address_a)
+        nm.get_next()  # initializes to 5, now at 6
+        nm.sync()  # re-fetches, gets 20
+        assert nm.get_next() == 20
+
+    def test_sync_resets_local_counter(self, mock_client, address_a):
+        mock_client.get_nonce.side_effect = [0, 50]
+        nm = NonceManager(mock_client, address_a)
+        for _ in range(5):
+            nm.get_next()  # burns 0–4
+        nm.sync()
+        assert nm.peek() == 50
+
+    def test_reset_overrides_nonce(self, mock_client, address_a):
+        mock_client.get_nonce.return_value = 5
+        nm = NonceManager(mock_client, address_a)
+        nm.reset(100)
+        assert nm.get_next() == 100
+
+    def test_reset_does_not_call_chain(self, mock_client, address_a):
+        nm = NonceManager(mock_client, address_a)
+        nm.reset(42)
+        mock_client.get_nonce.assert_not_called()
+
+    def test_reset_negative_raises(self, mock_client, address_a):
+        nm = NonceManager(mock_client, address_a)
+        with pytest.raises(ValueError):
+            nm.reset(-1)
+
+    def test_reset_non_int_raises(self, mock_client, address_a):
+        nm = NonceManager(mock_client, address_a)
+        with pytest.raises(ValueError):
+            nm.reset("five")  # type: ignore
+
+    def test_thread_safety_no_duplicate_nonces(self, mock_client, address_a):
+        mock_client.get_nonce.return_value = 0
+        nm = NonceManager(mock_client, address_a)
+        nonces: list[int] = []
+        lock = threading.Lock()
+
+        def grab():
+            n = nm.get_next()
+            with lock:
+                nonces.append(n)
+
+        threads = [threading.Thread(target=grab) for _ in range(50)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert len(nonces) == 50
+        assert sorted(nonces) == list(range(50))  # all unique, sequential

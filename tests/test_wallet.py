@@ -10,6 +10,8 @@ Test groups:
   6. verify_message — round-trip verification
 """
 
+import json
+
 import pytest
 
 from core.wallet import WalletManager, _SecretStr
@@ -247,6 +249,74 @@ class TestSignTransaction:
         bad_tx = {k: v for k, v in self.VALID_TX.items() if k != "chainId"}
         with pytest.raises(ValueError, match="chainId"):
             wallet.sign_transaction(bad_tx)
+
+
+# ── 6. verify_message ────────────────────────────────────────────────────────
+
+
+# ── 7. Encrypted Keyfile (stretch goal) ──────────────────────────────────────
+
+
+class TestEncryptedKeyfile:
+    """Tests for from_keyfile() and to_keyfile() stretch goal."""
+
+    def test_to_keyfile_creates_file(self, wallet, tmp_path):
+        keyfile = tmp_path / "test.json"
+        wallet.to_keyfile(str(keyfile), "test-password")
+        assert keyfile.exists()
+
+    def test_to_keyfile_output_is_valid_json(self, wallet, tmp_path):
+        keyfile = tmp_path / "test.json"
+        wallet.to_keyfile(str(keyfile), "test-password")
+        with open(keyfile) as f:
+            data = json.load(f)
+        assert "version" in data or "crypto" in data or "Crypto" in data
+
+    def test_round_trip_preserves_address(self, wallet, tmp_path):
+        keyfile = tmp_path / "wallet.json"
+        wallet.to_keyfile(str(keyfile), "secure-pass")
+        loaded = WalletManager.from_keyfile(str(keyfile), "secure-pass")
+        assert loaded.address == wallet.address
+
+    def test_from_keyfile_wrong_password_raises(self, wallet, tmp_path):
+        keyfile = tmp_path / "wallet.json"
+        wallet.to_keyfile(str(keyfile), "correct-password")
+        with pytest.raises(ValueError, match="decrypt"):
+            WalletManager.from_keyfile(str(keyfile), "wrong-password")
+
+    def test_from_keyfile_not_found_raises(self, tmp_path):
+        missing = str(tmp_path / "nonexistent.json")
+        with pytest.raises(FileNotFoundError):
+            WalletManager.from_keyfile(missing, "password")
+
+    def test_from_keyfile_invalid_json_raises(self, tmp_path):
+        bad_file = tmp_path / "bad.json"
+        bad_file.write_text("this is not json {{{")
+        with pytest.raises(ValueError, match="JSON"):
+            WalletManager.from_keyfile(str(bad_file), "password")
+
+    def test_to_keyfile_empty_password_raises(self, wallet, tmp_path):
+        keyfile = tmp_path / "wallet.json"
+        with pytest.raises(ValueError, match="empty"):
+            wallet.to_keyfile(str(keyfile), "")
+
+    def test_to_keyfile_password_wrong_type_raises(self, wallet, tmp_path):
+        keyfile = tmp_path / "wallet.json"
+        with pytest.raises(TypeError):
+            wallet.to_keyfile(str(keyfile), 12345)  # type: ignore
+
+    def test_from_keyfile_password_wrong_type_raises(self, wallet, tmp_path):
+        keyfile = tmp_path / "wallet.json"
+        wallet.to_keyfile(str(keyfile), "good-pass")
+        with pytest.raises(TypeError):
+            WalletManager.from_keyfile(str(keyfile), 12345)  # type: ignore
+
+    def test_repr_after_keyfile_load_does_not_expose_key(self, wallet, tmp_path):
+        keyfile = tmp_path / "wallet.json"
+        wallet.to_keyfile(str(keyfile), "pass")
+        loaded = WalletManager.from_keyfile(str(keyfile), "pass")
+        key_fragment = TEST_PRIVATE_KEY[2:10]
+        assert key_fragment not in repr(loaded)
 
 
 # ── 6. verify_message ────────────────────────────────────────────────────────

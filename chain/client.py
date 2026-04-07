@@ -8,7 +8,7 @@ import logging
 import time
 from dataclasses import dataclass
 
-from web3 import Web3
+from web3 import AsyncWeb3, Web3
 from web3.exceptions import ContractLogicError
 
 from chain.errors import (
@@ -273,3 +273,35 @@ class ChainClient:
         tx_dict = tx.to_dict()
         result = self._call_with_retry("call", tx_dict, block)
         return bytes(result)
+
+    async def subscribe_pending_transactions(self, ws_url: str):
+        """
+        Subscribe to pending transaction hashes via WebSocket.
+
+        Yields transaction hashes as they appear in the mempool.
+        Requires a WebSocket RPC URL (wss://) and a node that supports
+        the eth_subscribe "newPendingTransactions" method.
+
+        Args:
+            ws_url: WebSocket RPC endpoint, e.g. wss://mainnet.infura.io/ws/v3/KEY
+
+        Yields:
+            Transaction hash strings (0x...).
+
+        Raises:
+            ImportError: If web3 async/websocket support is unavailable.
+            Exception: If the WebSocket connection fails.
+
+        Example::
+
+            async for tx_hash in client.subscribe_pending_transactions("wss://..."):
+                print(tx_hash)
+        """
+        async with AsyncWeb3(AsyncWeb3.WebSocketProvider(ws_url)) as w3:
+            await w3.eth.subscribe("newPendingTransactions")
+            async for message in w3.socket.process_subscriptions():
+                result = message.get("result") or (message.get("params", {}).get("result"))
+                if result is not None:
+                    if isinstance(result, bytes):
+                        result = "0x" + result.hex()
+                    yield str(result)

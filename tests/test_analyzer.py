@@ -24,7 +24,9 @@ from chain.analyzer import (
     UNISWAP_V2_SWAP_TOPIC,
     analyze,
     decode_function,
+    detect_mev_signals,
     format_text,
+    get_trace,
     main,
     parse_logs,
 )
@@ -507,3 +509,255 @@ class TestCLI:
         with patch("chain.analyzer.analyze", side_effect=RuntimeError("RPC failed")):
             exit_code = main([VALID_HASH])
         assert exit_code == 1
+
+    def test_mev_flag_adds_mev_to_analysis(self, capsys):
+        with patch("chain.analyzer.analyze") as mock_analyze:
+            mock_analyze.return_value = {
+                "transaction": {
+                    "hash": VALID_HASH,
+                    "from": ADDR_A,
+                    "to": ADDR_B,
+                    "value": 0,
+                    "gas": 21000,
+                    "nonce": 0,
+                    "input": "0x",
+                },
+                "receipt": {
+                    "block_number": 1,
+                    "status": True,
+                    "gas_used": 21000,
+                    "effective_gas_price": 25_000_000_000,
+                    "logs": [],
+                },
+                "timestamp": 1705329825,
+                "function": {"selector": None, "name": "ETH Transfer", "args": []},
+                "events": {"transfers": [], "swaps": [], "syncs": []},
+            }
+            exit_code = main([VALID_HASH, "--mev"])
+        assert exit_code == 0
+        captured = capsys.readouterr()
+        assert "MEV Analysis" in captured.out
+
+    def test_trace_flag_warns_on_rpc_failure(self, capsys):
+        with (
+            patch("chain.analyzer.analyze") as mock_analyze,
+            patch("chain.analyzer.get_trace", side_effect=RuntimeError("debug API not supported")),
+        ):
+            mock_analyze.return_value = {
+                "transaction": {
+                    "hash": VALID_HASH,
+                    "from": ADDR_A,
+                    "to": ADDR_B,
+                    "value": 0,
+                    "gas": 21000,
+                    "nonce": 0,
+                    "input": "0x",
+                },
+                "receipt": None,
+                "function": {"selector": None, "name": "ETH Transfer", "args": []},
+                "events": {"transfers": [], "swaps": [], "syncs": []},
+            }
+            exit_code = main([VALID_HASH, "--trace"])
+        assert exit_code == 0  # trace failure is a warning, not a fatal error
+        captured = capsys.readouterr()
+        assert "Warning" in captured.err
+
+    def test_trace_flag_includes_trace_in_output(self, capsys):
+        trace_data = {
+            "type": "CALL",
+            "from": ADDR_A,
+            "to": ADDR_B,
+            "value": "0x0",
+            "gasUsed": "0x5208",
+            "calls": [],
+        }
+        with (
+            patch("chain.analyzer.analyze") as mock_analyze,
+            patch("chain.analyzer.get_trace", return_value=trace_data),
+        ):
+            mock_analyze.return_value = {
+                "transaction": {
+                    "hash": VALID_HASH,
+                    "from": ADDR_A,
+                    "to": ADDR_B,
+                    "value": 0,
+                    "gas": 21000,
+                    "nonce": 0,
+                    "input": "0x",
+                },
+                "receipt": None,
+                "function": {"selector": None, "name": "ETH Transfer", "args": []},
+                "events": {"transfers": [], "swaps": [], "syncs": []},
+            }
+            exit_code = main([VALID_HASH, "--trace"])
+        assert exit_code == 0
+        captured = capsys.readouterr()
+        assert "Call Trace" in captured.out
+
+
+# ── 6. get_trace (stretch goal) ───────────────────────────────────────────────
+
+
+class TestGetTrace:
+    def test_invalid_hash_raises(self):
+        with pytest.raises(ValueError, match="Invalid transaction hash"):
+            get_trace("0xinvalid", DEFAULT_RPC)
+
+    def test_invalid_hash_no_prefix_raises(self):
+        with pytest.raises(ValueError, match="Invalid transaction hash"):
+            get_trace("ab" * 32, DEFAULT_RPC)
+
+    def test_returns_dict_on_success(self):
+        trace_result = {
+            "type": "CALL",
+            "from": ADDR_A,
+            "to": ADDR_B,
+            "value": "0x0",
+            "gasUsed": "0x5208",
+        }
+        mock_provider = MagicMock()
+        mock_provider.make_request.return_value = {"result": trace_result}
+        with patch("chain.analyzer.Web3") as mock_web3_cls:
+            mock_instance = MagicMock()
+            mock_instance.provider = mock_provider
+            mock_web3_cls.return_value = mock_instance
+            mock_web3_cls.HTTPProvider = MagicMock()
+            result = get_trace(VALID_HASH, DEFAULT_RPC)
+        assert result["type"] == "CALL"
+
+    def test_rpc_error_response_raises_runtime_error(self):
+        mock_provider = MagicMock()
+        mock_provider.make_request.return_value = {
+            "error": {"message": "Method not supported", "code": -32601}
+        }
+        with patch("chain.analyzer.Web3") as mock_web3_cls:
+            mock_instance = MagicMock()
+            mock_instance.provider = mock_provider
+            mock_web3_cls.return_value = mock_instance
+            mock_web3_cls.HTTPProvider = MagicMock()
+            with pytest.raises(RuntimeError, match="Trace unavailable"):
+                get_trace(VALID_HASH, DEFAULT_RPC)
+
+    def test_network_exception_raises_runtime_error(self):
+        mock_provider = MagicMock()
+        mock_provider.make_request.side_effect = ConnectionError("refused")
+        with patch("chain.analyzer.Web3") as mock_web3_cls:
+            mock_instance = MagicMock()
+            mock_instance.provider = mock_provider
+            mock_web3_cls.return_value = mock_instance
+            mock_web3_cls.HTTPProvider = MagicMock()
+            with pytest.raises(RuntimeError, match="Trace request failed"):
+                get_trace(VALID_HASH, DEFAULT_RPC)
+
+    def test_empty_result_returns_empty_dict(self):
+        mock_provider = MagicMock()
+        mock_provider.make_request.return_value = {"result": {}}
+        with patch("chain.analyzer.Web3") as mock_web3_cls:
+            mock_instance = MagicMock()
+            mock_instance.provider = mock_provider
+            mock_web3_cls.return_value = mock_instance
+            mock_web3_cls.HTTPProvider = MagicMock()
+            result = get_trace(VALID_HASH, DEFAULT_RPC)
+        assert result == {}
+
+
+# ── 7. detect_mev_signals (stretch goal) ─────────────────────────────────────
+
+
+class TestDetectMevSignals:
+    def _base_analysis(self) -> dict:
+        return {
+            "transaction": {
+                "hash": VALID_HASH,
+                "from": ADDR_A,
+                "to": ADDR_B,
+                "value": 0,
+                "gas": 21000,
+                "input": "0x",
+            },
+            "receipt": {
+                "block_number": 1,
+                "status": True,
+                "gas_used": 21000,
+                "effective_gas_price": 25_000_000_000,
+            },
+            "events": {"transfers": [], "swaps": [], "syncs": []},
+        }
+
+    def test_returns_dict_with_required_keys(self):
+        result = detect_mev_signals(self._base_analysis())
+        assert "signals" in result
+        assert "risk_level" in result
+        assert "note" in result
+
+    def test_signals_is_list(self):
+        result = detect_mev_signals(self._base_analysis())
+        assert isinstance(result["signals"], list)
+
+    def test_clean_transaction_has_no_signals(self):
+        result = detect_mev_signals(self._base_analysis())
+        assert result["risk_level"] == "none"
+        assert result["signals"] == []
+
+    def test_high_effective_gas_price_triggers_signal(self):
+        a = self._base_analysis()
+        a["receipt"]["effective_gas_price"] = 150 * 10**9  # 150 gwei
+        result = detect_mev_signals(a)
+        assert "high_effective_gas_price" in result["signals"]
+        assert result["risk_level"] in ("low", "medium", "high")
+
+    def test_multiple_swaps_triggers_signal(self):
+        a = self._base_analysis()
+        a["events"]["swaps"] = [{"pair": ADDR_A}, {"pair": ADDR_B}]
+        result = detect_mev_signals(a)
+        assert "multiple_swaps" in result["signals"]
+
+    def test_zero_value_swap_triggers_signal(self):
+        a = self._base_analysis()
+        a["transaction"]["value"] = 0
+        a["transaction"]["input"] = "0xa9059cbb" + "00" * 60
+        a["events"]["swaps"] = [{"pair": ADDR_A}]
+        result = detect_mev_signals(a)
+        assert "zero_value_swap" in result["signals"]
+
+    def test_high_gas_swap_triggers_signal(self):
+        a = self._base_analysis()
+        a["transaction"]["gas"] = 600_000
+        a["events"]["swaps"] = [{"pair": ADDR_A}]
+        result = detect_mev_signals(a)
+        assert "high_gas_swap" in result["signals"]
+
+    def test_multiple_signals_raise_risk_level(self):
+        a = self._base_analysis()
+        a["receipt"]["effective_gas_price"] = 200 * 10**9
+        a["events"]["swaps"] = [{"pair": ADDR_A}, {"pair": ADDR_B}]
+        result = detect_mev_signals(a)
+        assert result["risk_level"] in ("medium", "high")
+        assert len(result["signals"]) >= 2
+
+    def test_three_signals_is_high_risk(self):
+        a = self._base_analysis()
+        a["receipt"]["effective_gas_price"] = 200 * 10**9
+        a["events"]["swaps"] = [{"pair": ADDR_A}, {"pair": ADDR_B}]
+        a["transaction"]["gas"] = 700_000
+        a["transaction"]["input"] = "0x38ed1739" + "00" * 100
+        a["transaction"]["value"] = 0
+        result = detect_mev_signals(a)
+        assert result["risk_level"] == "high"
+
+    def test_note_is_string(self):
+        result = detect_mev_signals(self._base_analysis())
+        assert isinstance(result["note"], str)
+        assert len(result["note"]) > 0
+
+    def test_missing_receipt_does_not_raise(self):
+        a = self._base_analysis()
+        a["receipt"] = None
+        result = detect_mev_signals(a)
+        assert "signals" in result
+
+    def test_missing_events_does_not_raise(self):
+        a = self._base_analysis()
+        del a["events"]
+        result = detect_mev_signals(a)
+        assert "signals" in result
