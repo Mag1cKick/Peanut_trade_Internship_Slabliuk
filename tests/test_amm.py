@@ -228,6 +228,48 @@ class TestGetAmountOut:
         with pytest.raises(TypeError):
             eth_usdc_pair.get_amount_out(1.5, USDC)  # type: ignore
 
+    def test_matches_uniswap_v2_solidity_output(self):
+        """
+        Output must match the Uniswap V2 Solidity contract exactly.
+
+        Test vector taken from the official Uniswap V2 core test suite
+        (UniswapV2Pair.spec.ts, 'swap:token0'):
+            reserve0 = 5e18, reserve1 = 10e18
+            amountIn  = 1e18  (token0)
+            expected  = 1_662_497_915_624_478_906  (token1)
+
+        The Solidity formula uses amountIn*997 / (reserveIn*1000 + amountIn*997).
+        Our formula uses amountIn*9970 / (reserveIn*10000 + amountIn*9970).
+        Both are algebraically identical (factor of 10 cancels) and produce the
+        same integer-division result.
+        """
+        pair = UniswapV2Pair(
+            address=PAIR_ADDR,
+            token0=WETH,
+            token1=DAI,
+            reserve0=5 * 10**18,
+            reserve1=10 * 10**18,
+            fee_bps=30,
+        )
+        assert pair.get_amount_out(10**18, WETH) == 1_662_497_915_624_478_906
+
+    def test_fee_matches_uniswap_997_multiplier(self):
+        """
+        Our 9970/10000 fee multiplier is integer-division equivalent to
+        Uniswap V2's 997/1000 multiplier for all inputs.
+
+        For any amountIn a, reserveIn r_in, reserveOut r_out:
+            (a*9970*r_out) // (r_in*10000 + a*9970)
+          = (a*997*r_out)  // (r_in*1000  + a*997)
+
+        Verified here for several values to guard against any edge case.
+        """
+        r_in, r_out = 1_000_000 * 10**18, 500_000 * 10**18
+        for amount_in in [10**15, 10**18, 10**21, 7_777_777_777]:
+            our = (amount_in * 9970 * r_out) // (r_in * 10000 + amount_in * 9970)
+            sol = (amount_in * 997 * r_out) // (r_in * 1000 + amount_in * 997)
+            assert our == sol, f"Mismatch at amount_in={amount_in}: ours={our} sol={sol}"
+
     def test_integer_math_no_float_precision_loss(self):
         """Very large reserves must not lose precision (would break with float)."""
         pair = UniswapV2Pair(
@@ -242,6 +284,27 @@ class TestGetAmountOut:
         assert isinstance(result, int)
         # Would silently lose precision if floats were used internally
         assert result > 0
+
+    def test_large_number_precision_exact(self):
+        """Integer math must be bit-exact even with reserve values near uint112 max."""
+        # uint112 max = 2^112 - 1 ≈ 5.19e33
+        uint112_max = 2**112 - 1
+        pair = UniswapV2Pair(
+            address=PAIR_ADDR,
+            token0=WETH,
+            token1=DAI,
+            reserve0=uint112_max // 2,
+            reserve1=uint112_max // 2,
+            fee_bps=30,
+        )
+        amount_in = uint112_max // 1000  # 0.1% of max reserve
+        result = pair.get_amount_out(amount_in, WETH)
+        # Independently compute expected value
+        a_fee = amount_in * 9970
+        r_in = r_out = uint112_max // 2
+        expected = (a_fee * r_out) // (r_in * 10000 + a_fee)
+        assert result == expected
+        assert isinstance(result, int)
 
     def test_fee_reduces_output(self):
         """Higher fee means less output."""
