@@ -1,9 +1,5 @@
 """
 pricing/amm.py — Uniswap V2 AMM math and pair representation.
-
-All core calculations use integers only — no floating point anywhere in the
-hot path.  Decimal is used only for display/comparison values returned to
-callers (spot price, execution price, impact fraction).
 """
 
 from __future__ import annotations
@@ -18,9 +14,6 @@ from core.types import Address, Token
 
 if TYPE_CHECKING:
     from chain.client import ChainClient
-
-
-# ── On-chain ABIs ─────────────────────────────────────────────────────────────
 
 PAIR_ABI = [
     {
@@ -81,24 +74,10 @@ def _fetch_token(w3: Web3, address: str) -> Token:
     return Token(address=Address(checksum), symbol=symbol, decimals=decimals)
 
 
-# ── UniswapV2Pair ─────────────────────────────────────────────────────────────
-
-
 @dataclass
 class UniswapV2Pair:
     """
     Represents a Uniswap V2 liquidity pair.
-
-    All math uses integers only — no floats in any calculation.
-    Decimal appears only in display helpers (spot/execution price, impact).
-
-    Args:
-        address:  On-chain pair contract address.
-        token0:   The token stored as token0 in the contract.
-        token1:   The token stored as token1 in the contract.
-        reserve0: Current reserve of token0 (raw integer).
-        reserve1: Current reserve of token1 (raw integer).
-        fee_bps:  Pool fee in basis points (default 30 = 0.30%).
     """
 
     address: Address
@@ -119,14 +98,9 @@ class UniswapV2Pair:
         if self.token0 == self.token1:
             raise ValueError("token0 and token1 must be different tokens.")
 
-    # ── Internal helpers ──────────────────────────────────────────────────────
-
     def _reserves_for_token_in(self, token_in: Token) -> tuple[int, int]:
         """
         Return (reserve_in, reserve_out) for the given input token.
-
-        Raises:
-            ValueError: If token_in is not one of the two tokens in this pair.
         """
         if token_in == self.token0:
             return self.reserve0, self.reserve1
@@ -136,29 +110,9 @@ class UniswapV2Pair:
             f"Token {token_in} is not in pair " f"({self.token0.symbol}/{self.token1.symbol})."
         )
 
-    # ── Core AMM math ─────────────────────────────────────────────────────────
-
     def get_amount_out(self, amount_in: int, token_in: Token) -> int:
         """
         Calculate output amount for a given input using exact Uniswap V2 formula.
-
-        Matches the Solidity implementation byte-for-byte:
-
-            amount_in_with_fee = amount_in * (10000 - fee_bps)
-            numerator          = amount_in_with_fee * reserve_out
-            denominator        = reserve_in * 10000 + amount_in_with_fee
-            amount_out         = numerator // denominator
-
-        Args:
-            amount_in: Raw input amount (integer, no decimals).
-            token_in:  The token being sold into the pool.
-
-        Returns:
-            Raw output amount (integer).
-
-        Raises:
-            TypeError:  If amount_in is not an int.
-            ValueError: If amount_in <= 0 or token_in is not in this pair.
         """
         if not isinstance(amount_in, int):
             raise TypeError(f"amount_in must be int, got {type(amount_in).__name__}.")
@@ -173,20 +127,6 @@ class UniswapV2Pair:
     def get_amount_in(self, amount_out: int, token_out: Token) -> int:
         """
         Calculate required input for a desired output (inverse of get_amount_out).
-
-        Formula (ceiling division — always rounds up):
-
-            numerator   = reserve_in * amount_out * 10000
-            denominator = (reserve_out - amount_out) * (10000 - fee_bps)
-            amount_in   = numerator // denominator + 1
-
-        Args:
-            amount_out: Desired raw output amount.
-            token_out:  The token being bought from the pool.
-
-        Raises:
-            TypeError:  If amount_out is not an int.
-            ValueError: If amount_out <= 0, >= reserve_out, or token not in pair.
         """
         if not isinstance(amount_out, int):
             raise TypeError(f"amount_out must be int, got {type(amount_out).__name__}.")
@@ -209,12 +149,9 @@ class UniswapV2Pair:
         denominator = (reserve_out - amount_out) * (10000 - self.fee_bps)
         return numerator // denominator + 1
 
-    # ── Price helpers (Decimal, display only) ─────────────────────────────────
-
     def get_spot_price(self, token_in: Token) -> Decimal:
         """
         Return spot price as token_out per token_in at current reserves.
-        No fee applied, no price impact.  For display only.
         """
         reserve_in, reserve_out = self._reserves_for_token_in(token_in)
         return Decimal(reserve_out) / Decimal(reserve_in)
@@ -222,7 +159,6 @@ class UniswapV2Pair:
     def get_execution_price(self, amount_in: int, token_in: Token) -> Decimal:
         """
         Return actual execution price (token_out per token_in) for a trade.
-        Includes fee and price impact.
         """
         amount_out = self.get_amount_out(amount_in, token_in)
         if amount_out == 0:
@@ -232,8 +168,6 @@ class UniswapV2Pair:
     def get_price_impact(self, amount_in: int, token_in: Token) -> Decimal:
         """
         Return price impact as a fraction (0.01 = 1%).
-
-        impact = (spot_price - execution_price) / spot_price
         """
         spot = self.get_spot_price(token_in)
         if spot == 0:
@@ -241,12 +175,9 @@ class UniswapV2Pair:
         execution = self.get_execution_price(amount_in, token_in)
         return (spot - execution) / spot
 
-    # ── Immutable state update ─────────────────────────────────────────────────
-
     def simulate_swap(self, amount_in: int, token_in: Token) -> UniswapV2Pair:
         """
         Return a NEW pair with reserves updated as if the swap occurred.
-        Does NOT mutate this instance (useful for multi-hop simulations).
         """
         amount_out = self.get_amount_out(amount_in, token_in)
         if token_in == self.token0:
@@ -264,15 +195,10 @@ class UniswapV2Pair:
             fee_bps=self.fee_bps,
         )
 
-    # ── Chain loading ──────────────────────────────────────────────────────────
-
     @classmethod
     def from_chain(cls, address: Address, client: ChainClient) -> UniswapV2Pair:
         """
         Fetch current pair state (reserves + token metadata) from on-chain.
-
-        Uses the client's first web3 instance.  Fetches token symbol and
-        decimals lazily; falls back to a truncated address if the call fails.
         """
         w3 = client._web3_instances[0]
         pair_contract = w3.eth.contract(
