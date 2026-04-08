@@ -1,7 +1,7 @@
-# Peanut Trade — Week 1: Core & Chain Modules
+# Peanut Trade — Weeks 1 & 2: Core, Chain & Pricing Modules
 
 > Arbitrage trading system foundation — wallet management, blockchain interaction,
-> transaction building, and analysis.
+> transaction building, analysis, and on-chain pricing with routing and simulation.
 
 ---
 
@@ -48,7 +48,14 @@ PRIVATE_KEY=0x... python scripts/integration_test.py \
 │   ├── analyzer.py              # CLI: python -m chain.analyzer <tx_hash>
 │   └── errors.py                # ChainError hierarchy
 │
-├── pricing/                     # Week 2 placeholder
+├── pricing/                     # Week 2 — AMM math, routing, simulation, monitoring
+│   ├── amm.py                   # UniswapV2Pair — exact integer AMM formula
+│   ├── impact_analyzer.py       # PriceImpactAnalyzer — slippage tables, max trade size
+│   ├── router.py                # Route + RouteFinder — multi-hop DFS with gas-adjusted best route
+│   ├── mempool.py               # MempoolMonitor + ParsedSwap — live pending swap decoding
+│   ├── fork_simulator.py        # ForkSimulator — eth_call against local Anvil fork
+│   └── engine.py                # PricingEngine — unified interface + Quote + QuoteError
+│
 ├── exchange/                    # Week 3 placeholder
 ├── inventory/                   # Week 3 placeholder
 ├── strategy/                    # Week 4 placeholder
@@ -56,13 +63,19 @@ PRIVATE_KEY=0x... python scripts/integration_test.py \
 ├── safety/                      # Week 5 placeholder
 ├── config/                      # Week 5 placeholder
 │
-├── tests/                       # 342 unit tests, all passing
+├── tests/                       # 643 unit tests, all passing
 │   ├── test_wallet.py           # 37 tests — key loading, security, signing
 │   ├── test_serializer.py       # 55 tests — determinism, unicode, edge cases
 │   ├── test_types.py            # 68 tests — validation, arithmetic, equality
 │   ├── test_client.py           # 44 tests — retry logic, error classification
 │   ├── test_builder.py          # 55 tests — fluent API, validation
-│   └── test_analyzer.py         # 47 tests — decoding, parsing, CLI
+│   ├── test_analyzer.py         # 47 tests — decoding, parsing, CLI
+│   ├── test_amm.py              # 65 tests — AMM math, Solidity vector, precision
+│   ├── test_impact_analyzer.py  # 50 tests — slippage tables, binary search, CLI
+│   ├── test_router.py           # 38 tests — DFS routing, gas flip, sequential match
+│   ├── test_mempool.py          # 36 tests — calldata decoding, async monitor
+│   ├── test_fork_simulator.py   # 27 tests — mocked eth_call, reserve fetch
+│   └── test_pricing_engine.py   # 37 tests — integration, quote validity
 │
 ├── scripts/
 │   ├── integration_test.py      # End-to-end Sepolia test
@@ -230,10 +243,146 @@ assert CanonicalSerializer.verify_determinism(data, iterations=1000)
 
 ---
 
+## Week 2: Pricing Module
+
+### Architecture
+
+```
+                          ┌─────────────────────────────────┐
+                          │         PricingEngine            │
+                          │  load_pools() · refresh_pool()  │
+                          │  get_quote()  · pending_swaps   │
+                          └────────┬──────────┬─────────────┘
+                                   │          │
+               ┌───────────────────┘          └───────────────────┐
+               ▼                                                   ▼
+  ┌────────────────────────┐                        ┌─────────────────────────┐
+  │      RouteFinder        │                        │     ForkSimulator        │
+  │  _build_graph() (DFS)  │                        │  simulate_route()        │
+  │  find_best_route()     │                        │  compare_vs_calculation()│
+  │  compare_routes()      │                        └───────────┬─────────────┘
+  └────────────┬───────────┘                                    │ eth_call
+               │ Route                                          │ getAmountsOut
+               ▼                                                │ getReserves
+  ┌────────────────────────┐                                    ▼
+  │     UniswapV2Pair       │◄──────────────────────────── Anvil Fork
+  │  get_amount_out()       │    (integer AMM math,          (local RPC)
+  │  get_spot_price()       │     matches Solidity)
+  │  get_price_impact()     │
+  └────────────────────────┘
+
+  ┌────────────────────────┐
+  │    MempoolMonitor       │  wss:// subscription
+  │  start() (async)       │──────────────────────► pending txs
+  │  parse_transaction()   │  decodes V2 calldata
+  │  decode_swap_params()  │  calls engine._on_mempool_swap()
+  └────────────────────────┘
+```
+
+### AMM Math
+
+Our `get_amount_out` implements the **exact** Uniswap V2 Solidity formula using integer-only arithmetic:
+
+```
+amountOut = (amountIn × 9970 × reserveOut)
+            ─────────────────────────────────────
+            (reserveIn × 10000 + amountIn × 9970)
+```
+
+`9970/10000` is algebraically identical to Solidity's `997/1000` — and produces the **same integer-division result** for all inputs (verified in `test_fee_matches_uniswap_997_multiplier`).
+
+Test vector from the [Uniswap V2 core test suite](https://github.com/Uniswap/v2-core):
+
+| reserve0 | reserve1 | amountIn | expected amountOut |
+|---|---|---|---|
+| 5 × 10¹⁸ | 10 × 10¹⁸ | 10¹⁸ | **1,662,497,915,624,478,906** |
+
+### Quick Usage
+
+```python
+from chain.client import ChainClient
+from core.types import Address
+from pricing.engine import PricingEngine, QuoteError
+from pricing.amm import UniswapV2Pair
+from pricing.router import RouteFinder
+
+# ── 1. AMM math (no node required) ──────────────────────────────────────
+from core.types import Token
+from pricing.amm import UniswapV2Pair
+
+USDC = Token(address=Address("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"), symbol="USDC", decimals=6)
+WETH = Token(address=Address("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"), symbol="WETH", decimals=18)
+
+pair = UniswapV2Pair(
+    address=Address("0xB4e16d0168e52d35CaCD2c6185b44281Ec28C9Dc"),
+    token0=USDC, token1=WETH,
+    reserve0=100_000_000 * 10**6,   # 100M USDC
+    reserve1=50_000 * 10**18,        # 50k WETH
+    fee_bps=30,
+)
+
+amount_out = pair.get_amount_out(1_000 * 10**6, USDC)   # 1000 USDC → WETH
+impact     = pair.get_price_impact(1_000 * 10**6, USDC) # e.g. Decimal('0.00001')
+print(f"Out: {amount_out / 10**18:.6f} WETH  impact: {impact:.4%}")
+
+# ── 2. Multi-hop routing ─────────────────────────────────────────────────
+from pricing.router import RouteFinder
+
+dai_weth = UniswapV2Pair(...)   # second pool
+finder = RouteFinder(pools=[pair, dai_weth])
+
+best_route, net_output = finder.find_best_route(
+    token_in=USDC, token_out=WETH,
+    amount_in=1_000 * 10**6,
+    gas_price_gwei=20,
+)
+print(f"Best: {best_route}  net output: {net_output / 10**18:.6f} WETH")
+
+# ── 3. Full engine ───────────────────────────────────────────────────────
+client  = ChainClient(rpc_urls=["https://eth-mainnet.g.alchemy.com/v2/KEY"])
+engine  = PricingEngine(
+    chain_client=client,
+    fork_url="http://127.0.0.1:8545",   # anvil --fork-url $ETH_RPC_URL
+    ws_url="wss://eth-mainnet.g.alchemy.com/v2/KEY",
+)
+
+USDC_WETH_ADDR = Address("0xB4e16d0168e52d35CaCD2c6185b44281Ec28C9Dc")
+engine.load_pools([USDC_WETH_ADDR])
+
+try:
+    quote = engine.get_quote(USDC, WETH, amount_in=1_000 * 10**6, gas_price_gwei=20)
+    print(f"Route:     {quote.route}")
+    print(f"Expected:  {quote.expected_output / 10**18:.6f} WETH (net of gas)")
+    print(f"Simulated: {quote.simulated_output / 10**18:.6f} WETH (fork)")
+    print(f"Valid:     {quote.is_valid}")        # True if sim within 0.1% of expected
+except QuoteError as e:
+    print(f"Quote failed: {e}")
+```
+
+### Price Impact Analyzer CLI
+
+```bash
+# Trade size impact table — 1k, 10k, 100k USDC
+python -m pricing.impact_analyzer \
+  --pair 0xB4e16d0168e52d35CaCD2c6185b44281Ec28C9Dc \
+  --token-in 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 \
+  --sizes 1000,10000,100000 \
+  --rpc https://eth-mainnet.g.alchemy.com/v2/KEY
+```
+
+### Local Fork Setup
+
+```bash
+export ETH_RPC_URL=https://eth-mainnet.g.alchemy.com/v2/YOUR_KEY
+bash scripts/start_fork.sh          # starts Anvil on http://127.0.0.1:8545
+```
+
+---
+
 ## Running Tests
 
 ```bash
-make test                          # run all 342 tests
+make test                          # run all 643 tests
 python -m pytest tests/test_wallet.py -v     # one module
 python -m pytest -k "test_security" -v       # by name pattern
 ```

@@ -639,3 +639,171 @@ class TestSubscribePendingTransactions:
 
         assert len(collected) == 1
         assert collected[0] == "0x" + "cc" * 32
+
+
+# ── 15. _dispatch routing ─────────────────────────────────────────────────────
+
+
+class TestDispatch:
+    """Cover the _dispatch match arms directly (no retry layer)."""
+
+    def _mock_w3(self):
+        return MagicMock()
+
+    def test_get_balance(self, client):
+        w3 = self._mock_w3()
+        w3.eth.get_balance.return_value = 42
+        assert client._dispatch(w3, "get_balance", "0xabc") == 42
+        w3.eth.get_balance.assert_called_once_with("0xabc")
+
+    def test_get_transaction_count(self, client):
+        w3 = self._mock_w3()
+        w3.eth.get_transaction_count.return_value = 7
+        assert client._dispatch(w3, "get_transaction_count", "0xabc", "pending") == 7
+
+    def test_get_block(self, client):
+        w3 = self._mock_w3()
+        w3.eth.get_block.return_value = {"number": 100}
+        result = client._dispatch(w3, "get_block", "latest")
+        assert result["number"] == 100
+
+    def test_fee_history(self, client):
+        w3 = self._mock_w3()
+        w3.eth.fee_history.return_value = {"reward": []}
+        result = client._dispatch(w3, "fee_history", 5, "latest", [50])
+        assert "reward" in result
+
+    def test_estimate_gas(self, client):
+        w3 = self._mock_w3()
+        w3.eth.estimate_gas.return_value = 21_000
+        assert client._dispatch(w3, "estimate_gas", {}) == 21_000
+
+    def test_send_raw_transaction(self, client):
+        w3 = self._mock_w3()
+        w3.eth.send_raw_transaction.return_value = b"\xab" * 32
+        assert client._dispatch(w3, "send_raw_transaction", b"\x01") == b"\xab" * 32
+
+    def test_get_transaction_receipt(self, client):
+        w3 = self._mock_w3()
+        w3.eth.get_transaction_receipt.return_value = {"status": 1}
+        result = client._dispatch(w3, "get_transaction_receipt", "0xabc")
+        assert result["status"] == 1
+
+    def test_get_transaction(self, client):
+        w3 = self._mock_w3()
+        w3.eth.get_transaction.return_value = {"nonce": 3}
+        assert client._dispatch(w3, "get_transaction", "0xabc")["nonce"] == 3
+
+    def test_call(self, client):
+        w3 = self._mock_w3()
+        w3.eth.call.return_value = b"\x00" * 32
+        result = client._dispatch(w3, "call", {}, "latest")
+        assert result == b"\x00" * 32
+
+    def test_unknown_method_raises(self, client):
+        # ValueError from the match default case is caught by _dispatch's
+        # except Exception handler and re-wrapped as RPCError
+        w3 = self._mock_w3()
+        with pytest.raises(RPCError, match="Unknown method"):
+            client._dispatch(w3, "not_a_real_method")
+
+    def test_contract_logic_error_becomes_rpc_error(self, client):
+        from web3.exceptions import ContractLogicError
+
+        w3 = self._mock_w3()
+        w3.eth.estimate_gas.side_effect = ContractLogicError("execution reverted")
+        with pytest.raises(RPCError):
+            client._dispatch(w3, "estimate_gas", {})
+
+    def test_generic_exception_with_dict_args_extracts_code(self, client):
+        """Exception with dict args should extract code and message."""
+        w3 = self._mock_w3()
+        exc = Exception({"code": -32000, "message": "execution reverted"})
+        w3.eth.get_balance.side_effect = exc
+        with pytest.raises(RPCError):
+            client._dispatch(w3, "get_balance", "0xabc")
+
+    def test_generic_exception_without_dict_args(self, client):
+        w3 = self._mock_w3()
+        w3.eth.get_balance.side_effect = Exception("connection refused")
+        with pytest.raises(RPCError):
+            client._dispatch(w3, "get_balance", "0xabc")
+
+
+# ── 16. _classify_rpc_error ───────────────────────────────────────────────────
+
+
+class TestClassifyRPCError:
+    def _classify(self, msg, code=None):
+        from chain.client import _classify_rpc_error
+
+        return _classify_rpc_error(msg, code)
+
+    def test_insufficient_funds(self):
+        assert isinstance(self._classify("insufficient funds for transfer"), InsufficientFunds)
+
+    def test_nonce_too_low(self):
+        assert isinstance(self._classify("nonce too low"), NonceTooLow)
+
+    def test_replacement_underpriced(self):
+        assert isinstance(
+            self._classify("replacement transaction underpriced"), ReplacementUnderpriced
+        )
+
+    def test_already_known(self):
+        assert isinstance(self._classify("already known"), ReplacementUnderpriced)
+
+    def test_transaction_underpriced(self):
+        assert isinstance(self._classify("transaction underpriced"), ReplacementUnderpriced)
+
+    def test_unknown_returns_rpc_error(self):
+        err = self._classify("some unknown rpc problem")
+        assert type(err) is RPCError
+
+    def test_code_attached_to_rpc_error(self):
+        err = self._classify("unknown", code=-32000)
+        assert err.code == -32000
+
+    def test_case_insensitive(self):
+        assert isinstance(self._classify("INSUFFICIENT FUNDS"), InsufficientFunds)
+
+
+# ── 17. Additional edge cases ──────────────────────────────────────────────────
+
+
+class TestAdditionalEdgeCases:
+    def test_send_transaction_prepends_0x_when_missing(self, client):
+        """Result that is a plain string without 0x should get prefix added."""
+        with mock_dispatch(client, return_value="deadbeef" * 8):
+            result = client.send_transaction(b"\x01")
+        assert result.startswith("0x")
+
+    def test_get_receipt_not_found_error_returns_none(self, client):
+        """RPCError containing 'not found' should return None, not raise."""
+        with mock_dispatch(client, side_effect=RPCError("transaction not found")):
+            result = client.get_receipt("0xdeadbeef")
+        assert result is None
+
+    def test_get_receipt_other_rpc_error_reraises(self, client):
+        """RPCError NOT containing 'not found' should propagate."""
+        with mock_dispatch(client, side_effect=RPCError("connection refused")):
+            with pytest.raises(RPCError):
+                client.get_receipt("0xdeadbeef")
+
+    def test_get_gas_price_legacy_fallback(self, client):
+        """When EIP-1559 path raises, fall back to legacy gasPrice block field."""
+        calls = [0]
+
+        def call_with_retry_side_effect(method, *args, **kwargs):
+            calls[0] += 1
+            if calls[0] == 1:
+                # First _call_with_retry call (get_block inside the try) raises
+                raise Exception("fee_history not supported")
+            # Second call (get_block inside the except) returns legacy block
+            return {"gasPrice": 15_000_000_000}
+
+        with patch.object(client, "_call_with_retry", side_effect=call_with_retry_side_effect):
+            gp = client.get_gas_price()
+
+        assert isinstance(gp, GasPrice)
+        assert gp.base_fee == 15_000_000_000

@@ -1,9 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(pip install:*)",
-      "Bash(python -m pytest tests/ --tb=short -q)",
-      "Bash(python -m pytest tests/test_client.py::TestSubscribePendingTransactions --tb=short -q)"
-    ]
-  }
-}
