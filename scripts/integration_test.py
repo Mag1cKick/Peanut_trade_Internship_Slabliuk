@@ -1,10 +1,11 @@
 """
 scripts/integration_test.py — End-to-end integration test on Sepolia testnet.
 
+Reads PRIVATE_KEY, RPC_SEPOLIA_URL (or RPC_URL) from .env automatically.
+
 Run:
-    PRIVATE_KEY=0x... python scripts/integration_test.py
-    PRIVATE_KEY=0x... python scripts/integration_test.py --rpc https://...
-    PRIVATE_KEY=0x... python scripts/integration_test.py --dry-run  # skip send
+    python scripts/integration_test.py
+    python scripts/integration_test.py --dry-run   # build + sign, no broadcast
 
 Exit codes:
     0 — PASSED
@@ -22,23 +23,12 @@ from decimal import Decimal
 from eth_account import Account
 from eth_account.messages import encode_defunct
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-try:
-    from dotenv import load_dotenv
-
-    load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
-except ImportError:
-    pass
-
 from chain.analyzer import analyze, format_text
 from chain.builder import TransactionBuilder
 from chain.client import ChainClient
 from chain.errors import ChainError, TransactionTimeout
 from core.types import Address, TokenAmount
 from core.wallet import WalletManager
-
-DEFAULT_RPC = os.environ.get("RPC_URL", "https://rpc.sepolia.org")
 
 RECIPIENT = "0x000000000000000000000000000000000000dEaD"
 
@@ -257,20 +247,31 @@ def run(rpc_url: str, dry_run: bool = False) -> int:
 
 
 def main() -> int:
+    _root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv(os.path.join(_root, ".env"))
+    except ImportError:
+        pass
+
+    default_rpc = (
+        os.environ.get("RPC_SEPOLIA_URL") or os.environ.get("RPC_URL") or "https://rpc.sepolia.org"
+    )
+
     parser = argparse.ArgumentParser(
         description="Peanut Trade integration test — runs on Sepolia testnet",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  PRIVATE_KEY=0x... python scripts/integration_test.py
-  PRIVATE_KEY=0x... python scripts/integration_test.py --rpc https://sepolia.infura.io/v3/KEY
-  PRIVATE_KEY=0x... python scripts/integration_test.py --dry-run
+  python scripts/integration_test.py
+  python scripts/integration_test.py --dry-run
         """,
     )
     parser.add_argument(
         "--rpc",
-        default=DEFAULT_RPC,
-        help=f"Sepolia RPC URL (default: {DEFAULT_RPC})",
+        default=default_rpc,
+        help=f"Sepolia RPC URL (default: {default_rpc})",
     )
     parser.add_argument(
         "--dry-run",
