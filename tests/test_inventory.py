@@ -16,7 +16,8 @@ from decimal import Decimal
 
 import pytest
 
-from inventory.pnl import PnLEngine, PnLSnapshot, PortfolioPnL
+from inventory.pnl import PnLSnapshot, PortfolioPnL
+from inventory.pnl import PositionPnLEngine as PnLEngine
 from inventory.rebalancer import RebalanceOrder
 from inventory.rebalancer import WeightRebalancePlanner as RebalancePlanner
 from inventory.tracker import CostBasisTracker, Trade
