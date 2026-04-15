@@ -1,7 +1,7 @@
 """
 inventory/pnl.py — P&L engine combining realized and unrealized positions.
 
-Wraps InventoryTracker with mark-price valuation to produce:
+Wraps CostBasisTracker with mark-price valuation to produce:
   - Per-asset P&L snapshots (unrealized, realized, fees, return %)
   - Portfolio-level aggregates
 
@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal
 
-from inventory.tracker import InventoryTracker
+from inventory.tracker import CostBasisTracker
 
 
 @dataclass
@@ -45,10 +45,10 @@ class PortfolioPnL:
 class PnLEngine:
     """
     Computes realized and unrealized P&L for all positions in an
-    :class:`~inventory.tracker.InventoryTracker`.
+    :class:`~inventory.tracker.CostBasisTracker`.
     """
 
-    def __init__(self, tracker: InventoryTracker) -> None:
+    def __init__(self, tracker: CostBasisTracker) -> None:
         self._tracker = tracker
 
     def snapshot(self, mark_prices: dict[str, Decimal]) -> PortfolioPnL:

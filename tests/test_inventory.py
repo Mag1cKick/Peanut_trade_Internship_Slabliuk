@@ -2,7 +2,7 @@
 tests/test_inventory.py — Unit tests for inventory module
 
 Covers:
-  1. InventoryTracker — record_fill, cost basis, realized PnL, fees, history
+  1. CostBasisTracker — record_fill, cost basis, realized PnL, fees, history
   2. RebalancePlanner — compute_orders, weight_deviations, edge cases
   3. PnLEngine       — snapshot, asset_pnl, unrealized/realized aggregates
 
@@ -18,16 +18,16 @@ import pytest
 
 from inventory.pnl import PnLEngine, PnLSnapshot, PortfolioPnL
 from inventory.rebalancer import RebalanceOrder, RebalancePlanner
-from inventory.tracker import InventoryTracker, Trade
+from inventory.tracker import CostBasisTracker, Trade
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 1. InventoryTracker
+# 1. CostBasisTracker
 # ══════════════════════════════════════════════════════════════════════════════
 
 
-class TestInventoryTrackerBasic:
+class TestCostBasisTrackerBasic:
     def setup_method(self):
-        self.t = InventoryTracker()
+        self.t = CostBasisTracker()
 
     def test_new_tracker_has_no_positions(self):
         assert self.t.all_positions() == {}
@@ -64,9 +64,9 @@ class TestInventoryTrackerBasic:
         assert pos.avg_cost == Decimal("2100")
 
 
-class TestInventoryTrackerSell:
+class TestCostBasisTrackerSell:
     def setup_method(self):
-        self.t = InventoryTracker()
+        self.t = CostBasisTracker()
         self.t.record_fill("ETH", "buy", Decimal("2"), Decimal("2000"))
 
     def test_sell_reduces_qty(self):
@@ -96,7 +96,7 @@ class TestInventoryTrackerSell:
         assert pos.qty == Decimal("0")
 
     def test_sell_from_zero_position_no_error(self):
-        t = InventoryTracker()
+        t = CostBasisTracker()
         t.record_fill("ETH", "sell", Decimal("1"), Decimal("2000"))
         assert t.get_position("ETH").qty == Decimal("0")
 
@@ -105,9 +105,9 @@ class TestInventoryTrackerSell:
         assert "ETH" not in self.t.all_positions()
 
 
-class TestInventoryTrackerFees:
+class TestCostBasisTrackerFees:
     def setup_method(self):
-        self.t = InventoryTracker()
+        self.t = CostBasisTracker()
 
     def test_buy_fee_accumulates(self):
         self.t.record_fill("ETH", "buy", Decimal("1"), Decimal("2000"), fee=Decimal("2"))
@@ -128,9 +128,9 @@ class TestInventoryTrackerFees:
         assert self.t.get_position("ETH").total_fees == Decimal("4")
 
 
-class TestInventoryTrackerUnrealizedPnL:
+class TestCostBasisTrackerUnrealizedPnL:
     def setup_method(self):
-        self.t = InventoryTracker()
+        self.t = CostBasisTracker()
         self.t.record_fill("ETH", "buy", Decimal("1"), Decimal("2000"))
 
     def test_unrealized_above_cost(self):
@@ -149,9 +149,9 @@ class TestInventoryTrackerUnrealizedPnL:
         assert isinstance(self.t.unrealized_pnl("ETH", Decimal("2200")), Decimal)
 
 
-class TestInventoryTrackerExposure:
+class TestCostBasisTrackerExposure:
     def setup_method(self):
-        self.t = InventoryTracker()
+        self.t = CostBasisTracker()
         self.t.record_fill("ETH", "buy", Decimal("2"), Decimal("2000"))
         self.t.record_fill("BTC", "buy", Decimal("0.1"), Decimal("30000"))
 
@@ -168,9 +168,9 @@ class TestInventoryTrackerExposure:
         assert isinstance(self.t.total_exposure({"ETH": Decimal("2200")}), Decimal)
 
 
-class TestInventoryTrackerHistory:
+class TestCostBasisTrackerHistory:
     def setup_method(self):
-        self.t = InventoryTracker()
+        self.t = CostBasisTracker()
         self.t.record_fill("ETH", "buy", Decimal("1"), Decimal("2000"))
         self.t.record_fill("BTC", "buy", Decimal("0.1"), Decimal("30000"))
         self.t.record_fill("ETH", "sell", Decimal("0.5"), Decimal("2200"))
@@ -194,20 +194,20 @@ class TestInventoryTrackerHistory:
 
     def test_timestamp_auto_set(self):
         before = int(time.time() * 1000)
-        t2 = InventoryTracker()
+        t2 = CostBasisTracker()
         t2.record_fill("X", "buy", Decimal("1"), Decimal("100"))
         ts = t2.trade_history("X")[0].timestamp
         assert ts >= before
 
     def test_timestamp_explicit(self):
-        t2 = InventoryTracker()
+        t2 = CostBasisTracker()
         t2.record_fill("X", "buy", Decimal("1"), Decimal("100"), timestamp=999)
         assert t2.trade_history("X")[0].timestamp == 999
 
 
-class TestInventoryTrackerValidation:
+class TestCostBasisTrackerValidation:
     def setup_method(self):
-        self.t = InventoryTracker()
+        self.t = CostBasisTracker()
 
     def test_zero_qty_raises(self):
         with pytest.raises(ValueError, match="qty"):
@@ -234,16 +234,16 @@ class TestInventoryTrackerValidation:
             self.t.record_fill("ETH", "long", Decimal("1"), Decimal("2000"))
 
 
-class TestInventoryTrackerMultiAsset:
+class TestCostBasisTrackerMultiAsset:
     def test_independent_positions(self):
-        t = InventoryTracker()
+        t = CostBasisTracker()
         t.record_fill("ETH", "buy", Decimal("1"), Decimal("2000"))
         t.record_fill("BTC", "buy", Decimal("0.5"), Decimal("40000"))
         assert t.get_position("ETH").qty == Decimal("1")
         assert t.get_position("BTC").qty == Decimal("0.5")
 
     def test_all_positions_returns_both(self):
-        t = InventoryTracker()
+        t = CostBasisTracker()
         t.record_fill("ETH", "buy", Decimal("1"), Decimal("2000"))
         t.record_fill("BTC", "buy", Decimal("0.5"), Decimal("40000"))
         pos = t.all_positions()
@@ -416,8 +416,8 @@ class TestRebalancePlannerWeightDeviations:
 # ══════════════════════════════════════════════════════════════════════════════
 
 
-def _tracker_with_eth() -> InventoryTracker:
-    t = InventoryTracker()
+def _tracker_with_eth() -> CostBasisTracker:
+    t = CostBasisTracker()
     t.record_fill("ETH", "buy", Decimal("2"), Decimal("2000"), fee=Decimal("4"))
     return t
 
