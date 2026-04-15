@@ -22,18 +22,10 @@ import sys
 from datetime import UTC, datetime
 from decimal import Decimal
 
-# ── OrderBookAnalyzer ──────────────────────────────────────────────────────────
-
 
 class OrderBookAnalyzer:
     """
     Analyze order book snapshots for trading decisions.
-
-    Constructed from the dict returned by ExchangeClient.fetch_order_book()::
-
-        book = client.fetch_order_book("ETH/USDT")
-        analyzer = OrderBookAnalyzer(book)
-        result = analyzer.walk_the_book("buy", qty=2.0)
     """
 
     def __init__(self, orderbook: dict) -> None:
@@ -47,30 +39,9 @@ class OrderBookAnalyzer:
         self._best_bid: tuple[Decimal, Decimal] = best_bid
         self._best_ask: tuple[Decimal, Decimal] = best_ask
 
-    # ── Public API ─────────────────────────────────────────────────────────────
-
     def walk_the_book(self, side: str, qty: float) -> dict:
         """
         Simulate filling ``qty`` against the live order book.
-
-        ``side="buy"``  walks the ask side (you buy, market sells to you).
-        ``side="sell"`` walks the bid side (you sell, market buys from you).
-
-        Returns::
-
-            {
-                'avg_price':       Decimal,   # volume-weighted average fill price
-                'total_cost':      Decimal,   # qty × avg_price (quote currency)
-                'slippage_bps':    Decimal,   # (avg_price − best_price) / best_price × 10 000
-                'levels_consumed': int,       # how many price levels were touched
-                'fully_filled':    bool,      # False when book is too thin
-                'fills': [
-                    {'price': Decimal, 'qty': Decimal, 'cost': Decimal},
-                    ...
-                ],
-            }
-
-        When ``fully_filled=False``, fills show what liquidity IS available.
         """
         if side not in ("buy", "sell"):
             raise ValueError(f"side must be 'buy' or 'sell', got {side!r}")
@@ -119,13 +90,6 @@ class OrderBookAnalyzer:
     def depth_at_bps(self, side: str, bps: float) -> Decimal:
         """
         Total quantity available within ``bps`` basis points of best price.
-
-        ``side="bid"`` → measures support depth below best bid.
-        ``side="ask"`` → measures resistance depth above best ask.
-
-        Example: ``depth_at_bps("ask", 10)`` returns all ask quantity
-        within 10 bps of the best ask — i.e. how much you can buy without
-        moving the price more than 10 bps.
         """
         if side not in ("bid", "ask"):
             raise ValueError(f"side must be 'bid' or 'ask', got {side!r}")
@@ -149,12 +113,6 @@ class OrderBookAnalyzer:
     def imbalance(self, levels: int = 10) -> float:
         """
         Order book imbalance ratio in ``[-1.0, +1.0]``.
-
-        ``+1.0`` = all quantity on the bid (strong buy pressure)
-        ``-1.0`` = all quantity on the ask (strong sell pressure)
-        ``0.0``  = perfectly balanced
-
-        Only the top ``levels`` price levels on each side are considered.
         """
         bid_qty = float(sum(q for _, q in self._bids[:levels]))
         ask_qty = float(sum(q for _, q in self._asks[:levels]))
@@ -166,14 +124,6 @@ class OrderBookAnalyzer:
     def effective_spread(self, qty: float) -> Decimal:
         """
         Effective spread for a round-trip of size ``qty`` (in basis points).
-
-        ``= (avg_ask_fill − avg_bid_fill) / mid_price × 10 000``
-
-        This is the **true cost of immediacy** at your trade size.
-        Unlike the quoted spread (best bid/ask only), this accounts for
-        market impact — a 10 ETH round-trip costs more than a 0.1 ETH one.
-
-        Returns 0 if the book is empty or mid price is 0.
         """
         buy_result = self.walk_the_book("buy", qty)
         sell_result = self.walk_the_book("sell", qty)
@@ -185,8 +135,6 @@ class OrderBookAnalyzer:
             return Decimal("0")
 
         return (avg_ask - avg_bid) / self._mid * Decimal("10000")
-
-    # ── Properties for CLI ────────────────────────────────────────────────────
 
     @property
     def symbol(self) -> str:
@@ -217,9 +165,6 @@ class OrderBookAnalyzer:
         return (ask_p - bid_p) / self._mid * Decimal("10000")
 
 
-# ── CLI ────────────────────────────────────────────────────────────────────────
-
-
 def _fmt_bps(bps: Decimal) -> str:
     return f"{bps:.2f} bps"
 
@@ -239,7 +184,7 @@ def _box_line(content: str, width: int = 54) -> str:
 
 
 def _print_analysis(analyzer: OrderBookAnalyzer, qty_small: float, qty_large: float) -> None:
-    W = 56  # total box width including borders
+    W = 56
 
     ts = datetime.fromtimestamp(analyzer.timestamp / 1000, tz=UTC)
     ts_str = ts.strftime("%Y-%m-%d %H:%M:%S UTC") if analyzer.timestamp else "N/A"
@@ -325,7 +270,6 @@ def _run_cli(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    # Load .env
     _root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     try:
         from dotenv import load_dotenv
@@ -342,7 +286,7 @@ def _run_cli(argv: list[str] | None = None) -> int:
 
         config = {
             "apiKey": api_key,
-            "secret": api_secret,  # pragma: allowlist secret
+            "secret": api_secret,
             "sandbox": True,
             "enableRateLimit": True,
         }

@@ -164,10 +164,6 @@ class WeightRebalancePlanner:
         return abs(target - current) / target * Decimal("10000")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Constants — fee schedule and minimum operating balances
-# ══════════════════════════════════════════════════════════════════════════════
-
 TRANSFER_FEES: dict[str, dict] = {
     "ETH": {
         "withdrawal_fee": Decimal("0.005"),
@@ -202,10 +198,6 @@ MIN_OPERATING_BALANCE: dict[str, Decimal] = {
     "BTC": Decimal("0.01"),
 }
 
-# ══════════════════════════════════════════════════════════════════════════════
-# TransferPlan — a single cross-venue transfer
-# ══════════════════════════════════════════════════════════════════════════════
-
 
 @dataclass
 class TransferPlan:
@@ -224,27 +216,9 @@ class TransferPlan:
         return self.amount - self.estimated_fee
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# RebalancePlanner — venue-aware cross-venue transfer planner
-# ══════════════════════════════════════════════════════════════════════════════
-
-
 class RebalancePlanner:
     """
     Venue-aware rebalancer that works with :class:`~inventory.tracker.InventoryTracker`.
-
-    Detects cross-venue skew, plans on-chain / CEX transfers with fee estimates,
-    and respects minimum operating balances.
-
-    Usage::
-
-        tracker = InventoryTracker([Venue.BINANCE, Venue.WALLET])
-        tracker.update_from_cex(Venue.BINANCE, {"ETH": {"free": "9", "locked": "0"}})
-        tracker.update_from_wallet(Venue.WALLET, {"ETH": "1"})
-
-        planner = RebalancePlanner(tracker)
-        plans = planner.plan("ETH")
-        cost  = planner.estimate_cost(plans)
     """
 
     def __init__(
@@ -255,30 +229,17 @@ class RebalancePlanner:
     ) -> None:
         self._tracker = tracker
         self._threshold_pct = threshold_pct
-        # target_ratio: {Venue: fraction} — must sum to 1.0.
-        # If None, equal distribution across all venues is assumed.
         self._target_ratio = target_ratio
-
-    # ── Public API ─────────────────────────────────────────────────────────────
 
     def check_all(self) -> list[dict]:
         """
         Return skew analysis for every tracked asset.
-
-        Same schema as :meth:`~inventory.tracker.InventoryTracker.get_skews`.
         """
         return self._tracker.get_skews()
 
     def plan(self, asset: str) -> list[TransferPlan]:
         """
         Compute the minimum set of transfers to rebalance ``asset`` across venues.
-
-        Respects:
-        - ``MIN_OPERATING_BALANCE``: source venue keeps at least the minimum.
-        - ``TRANSFER_FEES``: transfers smaller than ``min_withdrawal`` are dropped.
-        - ``threshold_pct``: no plans produced if the asset is already balanced.
-
-        Returns an empty list when no rebalance is needed or feasible.
         """
         skew = self._tracker.skew(asset)
         if skew["max_deviation_pct"] <= self._threshold_pct:
@@ -301,7 +262,6 @@ class RebalancePlanner:
                     return v
             raise ValueError(f"Unknown venue: {name}")
 
-        # Determine target fraction per venue.
         if self._target_ratio is not None:
             targets: dict[str, Decimal] = {
                 (v.value if hasattr(v, "value") else str(v)): Decimal(str(frac))
@@ -311,7 +271,6 @@ class RebalancePlanner:
             equal = Decimal("1") / Decimal(str(n))
             targets = {v: equal for v in venues_data}
 
-        # Compute surplus / deficit per venue.
         surplus: list[list] = []
         deficit: list[list] = []
 
@@ -324,7 +283,6 @@ class RebalancePlanner:
             elif delta < 0:
                 deficit.append([venue_name, abs(delta)])
 
-        # Fee info for this asset.
         fee_info = TRANSFER_FEES.get(asset, {})
         fee_amount = fee_info.get("withdrawal_fee", Decimal("0"))
         min_withdrawal = fee_info.get("min_withdrawal", Decimal("0"))
@@ -334,14 +292,12 @@ class RebalancePlanner:
 
         plans: list[TransferPlan] = []
 
-        # Greedy matching: pair surplus venues with deficit venues.
         si = 0
         di = 0
         while si < len(surplus) and di < len(deficit):
             src_name, src_avail = surplus[si]
             dst_name, dst_need = deficit[di]
 
-            # Can't drop source below min operating balance.
             src_bal = self._tracker._balances.get(_to_venue(src_name), {}).get(asset)
             src_total = src_bal.total if src_bal is not None else Decimal("0")
             max_transferable = max(Decimal("0"), src_total - min_op)
@@ -359,7 +315,6 @@ class RebalancePlanner:
                     )
                 )
 
-            # Advance pointers.
             surplus[si][1] -= transfer_amount
             deficit[di][1] -= transfer_amount
             if surplus[si][1] <= Decimal("0"):
@@ -372,9 +327,6 @@ class RebalancePlanner:
     def plan_all(self) -> dict[str, list[TransferPlan]]:
         """
         Return transfer plans for every asset that needs rebalancing.
-
-        Returns ``{asset: [TransferPlan, ...]}``.  Assets already balanced
-        are omitted.
         """
         result: dict[str, list[TransferPlan]] = {}
         for skew in self.check_all():
@@ -388,15 +340,6 @@ class RebalancePlanner:
     def estimate_cost(self, plans: list[TransferPlan]) -> dict:
         """
         Summarise the cost and logistics of a list of transfer plans.
-
-        Returns::
-
-            {
-                'total_transfers':  int,
-                'total_fees_usd':   Decimal,   # total fees (in asset units)
-                'total_time_min':   int,        # critical-path time (max, not sum)
-                'assets_affected':  list[str],
-            }
         """
         if not plans:
             return {
@@ -418,11 +361,6 @@ class RebalancePlanner:
         }
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# CLI
-# ══════════════════════════════════════════════════════════════════════════════
-
-
 def _run_cli(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Venue rebalance planner — connects to demo tracker",
@@ -442,7 +380,6 @@ def _run_cli(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    # Build a demo tracker so the CLI is self-contained.
     from inventory.tracker import InventoryTracker, Venue
 
     tracker = InventoryTracker([Venue.BINANCE, Venue.WALLET])
@@ -509,7 +446,7 @@ def _run_cli(argv: list[str] | None = None) -> int:
         )
         return 0
 
-    return 0  # unreachable
+    return 0
 
 
 if __name__ == "__main__":

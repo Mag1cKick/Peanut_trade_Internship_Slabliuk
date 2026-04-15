@@ -20,19 +20,12 @@ from decimal import Decimal
 from enum import Enum
 from typing import Literal
 
-# ── Shared types ───────────────────────────────────────────────────────────────
-
 TradeType = Literal["buy", "sell"]
 
 
 class Venue(str, Enum):
     BINANCE = "binance"
-    WALLET = "wallet"  # On-chain / DEX venue
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# CostBasisTracker — fills-based P&L accounting
-# ══════════════════════════════════════════════════════════════════════════════
+    WALLET = "wallet"
 
 
 @dataclass
@@ -61,15 +54,6 @@ class Position:
 class CostBasisTracker:
     """
     Tracks open positions and realized P&L using weighted-average cost basis.
-
-    Usage::
-
-        tracker = CostBasisTracker()
-        tracker.record_fill("ETH", "buy",  qty=Decimal("1"), price=Decimal("2000"))
-        tracker.record_fill("ETH", "sell", qty=Decimal("0.5"), price=Decimal("2200"))
-
-        pos = tracker.get_position("ETH")
-        print(pos.realized_pnl)  # Decimal("100")
     """
 
     def __init__(self) -> None:
@@ -143,16 +127,6 @@ class CostBasisTracker:
         return [t for t in self._trades if t.asset == asset]
 
 
-# ── Backwards-compat alias used by PnLEngine ──────────────────────────────────
-# Kept so existing imports of InventoryTracker still work during migration.
-# Will be removed once all callers are updated.
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# InventoryTracker — multi-venue real-time balance sheet
-# ══════════════════════════════════════════════════════════════════════════════
-
-
 @dataclass
 class Balance:
     """Real-time balance of one asset at one venue."""
@@ -171,37 +145,15 @@ class InventoryTracker:
     """
     Tracks positions across CEX and DEX venues.
     Single source of truth for where funds currently sit.
-
-    Usage::
-
-        tracker = InventoryTracker([Venue.BINANCE, Venue.WALLET])
-
-        # After fetching from ExchangeClient:
-        tracker.update_from_cex(Venue.BINANCE, client.fetch_balance())
-
-        # After reading on-chain wallet:
-        tracker.update_from_wallet(Venue.WALLET, {"ETH": Decimal("5.0")})
-
-        # Pre-flight arb check:
-        ok = tracker.can_execute(
-            buy_venue=Venue.BINANCE,  buy_asset="USDT",  buy_amount=Decimal("4000"),
-            sell_venue=Venue.WALLET,  sell_asset="ETH",  sell_amount=Decimal("2"),
-        )
     """
 
     def __init__(self, venues: list[Venue]) -> None:
         self._venues: list[Venue] = list(venues)
-        # {venue: {asset: Balance}}
         self._balances: dict[Venue, dict[str, Balance]] = {v: {} for v in venues}
-
-    # ── Balance ingestion ──────────────────────────────────────────────────────
 
     def update_from_cex(self, venue: Venue, balances: dict) -> None:
         """
         Replace the stored snapshot for ``venue`` with fresh CEX data.
-
-        ``balances`` is the dict returned by ``ExchangeClient.fetch_balance()``:
-        ``{asset: {'free': Decimal, 'locked': Decimal, 'total': Decimal}}``.
         """
         snapshot: dict[str, Balance] = {}
         for asset, info in balances.items():
@@ -218,8 +170,6 @@ class InventoryTracker:
     def update_from_wallet(self, venue: Venue, balances: dict) -> None:
         """
         Replace the stored snapshot for ``venue`` with on-chain wallet data.
-
-        ``balances`` is ``{asset: amount}`` (all funds are free on-chain).
         """
         snapshot: dict[str, Balance] = {}
         for asset, amount in balances.items():
@@ -230,22 +180,9 @@ class InventoryTracker:
             )
         self._balances[venue] = snapshot
 
-    # ── Queries ────────────────────────────────────────────────────────────────
-
     def snapshot(self) -> dict:
         """
         Full portfolio snapshot at current time.
-
-        Returns::
-
-            {
-                'timestamp': datetime,
-                'venues': {
-                    'binance': {'ETH': {'free': ..., 'locked': ..., 'total': ...}},
-                    'wallet':  {'ETH': {'free': ..., 'locked': ..., 'total': ...}},
-                },
-                'totals': {'ETH': Decimal('20.0'), 'USDT': Decimal('40000.0')},
-            }
         """
         venues_data: dict[str, dict] = {}
         totals: dict[str, Decimal] = {}
@@ -283,17 +220,6 @@ class InventoryTracker:
     ) -> dict:
         """
         Pre-flight check: can both legs of an arbitrage be executed?
-
-        Returns::
-
-            {
-                'can_execute': bool,
-                'buy_venue_available': Decimal,
-                'buy_venue_needed': Decimal,
-                'sell_venue_available': Decimal,
-                'sell_venue_needed': Decimal,
-                'reason': str | None,
-            }
         """
         buy_available = self.get_available(buy_venue, buy_asset)
         sell_available = self.get_available(sell_venue, sell_asset)
@@ -332,10 +258,6 @@ class InventoryTracker:
     ) -> None:
         """
         Update internal balances after a trade executes.
-
-        Buy:  base increases, quote decreases.
-        Sell: base decreases, quote increases.
-        Fee is always deducted from ``fee_asset``.
         """
         if venue not in self._balances:
             self._balances[venue] = {}
@@ -358,27 +280,9 @@ class InventoryTracker:
         fee_bal = _ensure(fee_asset)
         fee_bal.free -= fee
 
-    # ── Skew analysis ──────────────────────────────────────────────────────────
-
     def skew(self, asset: str) -> dict:
         """
         Distribution of ``asset`` across all venues.
-
-        Compares each venue's share against the equal-weight benchmark
-        (100% / number_of_venues).  A deviation > 30 % flags rebalance need.
-
-        Returns::
-
-            {
-                'asset': str,
-                'total': Decimal,
-                'venues': {
-                    'binance': {'amount': Decimal, 'pct': float, 'deviation_pct': float},
-                    'wallet':  {'amount': Decimal, 'pct': float, 'deviation_pct': float},
-                },
-                'max_deviation_pct': float,
-                'needs_rebalance': bool,
-            }
         """
         total = Decimal("0")
         venue_amounts: dict[str, Decimal] = {}
@@ -419,9 +323,6 @@ class InventoryTracker:
     def get_skews(self) -> list[dict]:
         """
         Skew analysis for every asset that appears across any venue.
-
-        Returns one dict per asset (same schema as :meth:`skew`),
-        sorted alphabetically.  Used by Week 4's SignalScorer.
         """
         all_assets: set[str] = set()
         for assets in self._balances.values():
