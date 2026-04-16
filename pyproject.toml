@@ -15,6 +15,10 @@ indent-style = "space"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-v --tb=short"
+addopts = "-v --tb=short --ignore=tests/live"
 asyncio_mode = "auto"
 pythonpath = ["."]
+
+markers = [
+    "live: live integration tests requiring real API keys (Binance testnet)",
+]
