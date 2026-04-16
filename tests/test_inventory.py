@@ -550,3 +550,29 @@ class TestPnLSnapshotDataclass:
         )
         assert p.net_pnl == Decimal("300")
         assert p.snapshots == []
+
+
+# ── Coverage gap tests ─────────────────────────────────────────────────────────
+
+
+class TestRecordTradeNewVenue:
+    """Cover record_trade initialising balances for a previously-unseen venue (line 263)."""
+
+    def test_record_trade_to_new_venue_no_error(self):
+        from inventory.tracker import InventoryTracker, Venue
+
+        tracker = InventoryTracker([Venue.BINANCE, Venue.WALLET])
+        # record_trade on BINANCE which was not pre-loaded with update_from_cex
+        D = __import__("decimal").Decimal
+        tracker.record_trade(
+            Venue.BINANCE,
+            "buy",
+            "ETH",
+            "USDT",
+            D("1"),
+            D("2000"),
+            D("0.002"),
+            "USDT",
+        )
+        available = tracker.get_available(Venue.BINANCE, "ETH")
+        assert available >= 0

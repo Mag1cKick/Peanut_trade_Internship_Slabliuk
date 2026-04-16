@@ -16,6 +16,7 @@ Test groups:
 from __future__ import annotations
 
 from decimal import Decimal
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -419,3 +420,72 @@ class TestCLIPrintAnalysis:
         _print_analysis(a, qty_small=1.0, qty_large=2.0)
         captured = capsys.readouterr()
         assert "Effective spread" in captured.out
+
+
+# ── Coverage gap tests ─────────────────────────────────────────────────────────
+
+
+class TestBoxLine:
+    def test_box_line_returns_string(self):
+        from exchange.orderbook import _box_line
+
+        result = _box_line("hello")
+        assert isinstance(result, str)
+        assert "hello" in result
+
+    def test_box_line_custom_width(self):
+        from exchange.orderbook import _box_line
+
+        result = _box_line("x", width=60)
+        assert isinstance(result, str)
+
+
+class TestRunCLI:
+    """_run_cli with a mocked ExchangeClient."""
+
+    def _mock_book(self):
+        return {
+            "symbol": "ETH/USDT",
+            "timestamp": 1700000000000,
+            "bids": [
+                (Decimal("2000"), Decimal("5")),
+                (Decimal("1999"), Decimal("3")),
+                (Decimal("1998"), Decimal("2")),
+            ],
+            "asks": [
+                (Decimal("2001"), Decimal("4")),
+                (Decimal("2002"), Decimal("2")),
+                (Decimal("2003"), Decimal("1")),
+            ],
+            "best_bid": (Decimal("2000"), Decimal("5")),
+            "best_ask": (Decimal("2001"), Decimal("4")),
+            "mid_price": Decimal("2000.5"),
+            "spread_bps": Decimal("5"),
+        }
+
+    def test_cli_exits_zero_with_mocked_client(self, capsys):
+        from exchange.client import ExchangeClient
+        from exchange.orderbook import _run_cli
+
+        mock_client = MagicMock(spec=ExchangeClient)
+        mock_client.fetch_order_book.return_value = self._mock_book()
+        with patch("exchange.client.ExchangeClient", return_value=mock_client):
+            rc = _run_cli(["ETH/USDT", "--qty", "1.0", "--qty-large", "3.0"])
+        assert rc == 0
+
+    def test_cli_exchange_error_returns_one(self):
+        from exchange.orderbook import _run_cli
+
+        with patch("exchange.client.ExchangeClient", side_effect=Exception("conn error")):
+            rc = _run_cli(["ETH/USDT"])
+        assert rc == 1
+
+    def test_cli_prints_symbol(self, capsys):
+        from exchange.orderbook import _run_cli
+
+        mock_client = MagicMock()
+        mock_client.fetch_order_book.return_value = self._mock_book()
+        with patch("exchange.client.ExchangeClient", return_value=mock_client):
+            _run_cli(["ETH/USDT"])
+        out = capsys.readouterr().out
+        assert "ETH/USDT" in out

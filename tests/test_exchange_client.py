@@ -633,3 +633,22 @@ class TestToDecimal:
 
     def test_integer_input(self):
         assert _to_decimal(42) == Decimal("42")
+
+
+# ── Coverage gap tests ─────────────────────────────────────────────────────────
+
+
+class TestFetchBalanceNonDictKey:
+    """fetch_balance skips non-dict values (line 114 in client.py)."""
+
+    def test_non_dict_asset_skipped(self):
+        client, mock_ex = _make_client()
+        mock_ex.fetch_balance.return_value = {
+            "ETH": {"free": 1.0, "used": 0.0, "total": 1.0},
+            "info": "string_not_a_dict",  # non-dict → must be skipped
+            "timestamp": 1700000000000,  # non-dict → must be skipped
+        }
+        bal = client.fetch_balance()
+        assert "ETH" in bal
+        assert "info" not in bal
+        assert "timestamp" not in bal

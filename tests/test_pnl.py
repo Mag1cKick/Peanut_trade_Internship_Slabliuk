@@ -513,3 +513,34 @@ class TestCLI:
         with pytest.raises(SystemExit) as exc:
             _run_cli([])
         assert exc.value.code != 0
+
+
+# ── Coverage gap tests ─────────────────────────────────────────────────────────
+
+
+class TestRunCLINoArgs:
+    """Cover _run_cli() fallthrough return 0 (line 532) and both CLI paths."""
+
+    def test_cli_no_args_exits_with_error(self):
+        """When neither --summary nor --recent is passed, argparse exits with code 2."""
+        import pytest
+
+        from inventory.pnl import _run_cli
+
+        with pytest.raises(SystemExit) as exc_info:
+            _run_cli([])
+        assert exc_info.value.code == 2
+
+    def test_cli_summary_flag(self, capsys):
+        from inventory.pnl import _run_cli
+
+        rc = _run_cli(["--summary"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Trades" in out or "Win" in out or "Total" in out
+
+    def test_cli_recent_flag(self, capsys):
+        from inventory.pnl import _run_cli
+
+        rc = _run_cli(["--recent", "5"])
+        assert rc == 0

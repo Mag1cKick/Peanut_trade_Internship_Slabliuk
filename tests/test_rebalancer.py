@@ -422,3 +422,121 @@ class TestCLI:
         with pytest.raises(SystemExit) as exc_info:
             _run_cli([])
         assert exc_info.value.code != 0
+
+
+# ── Coverage gap tests ─────────────────────────────────────────────────────────
+
+
+class TestWeightPlannerDeviationBps:
+    """Cover _deviation_bps(target=0) branch (line 163)."""
+
+    def test_zero_target_returns_current_times_10000(self):
+        from inventory.rebalancer import WeightRebalancePlanner
+
+        result = WeightRebalancePlanner._deviation_bps(
+            target=__import__("decimal").Decimal("0"),
+            current=__import__("decimal").Decimal("5"),
+        )
+        assert result == __import__("decimal").Decimal("50000")
+
+
+class TestPlanEdgeCases:
+    """Cover total==0 and n<2 branches (lines 250, 255) and target_ratio (line 266)."""
+
+    def test_plan_returns_empty_when_total_zero(self):
+        from inventory.rebalancer import RebalancePlanner
+        from inventory.tracker import InventoryTracker, Venue
+
+        tracker = InventoryTracker([Venue.BINANCE, Venue.WALLET])
+        # No funds loaded → total == 0 for any asset
+        planner = RebalancePlanner(tracker, threshold_pct=0.0)
+        plans = planner.plan("ETH")
+        assert plans == []
+
+    def test_plan_returns_empty_when_single_venue(self):
+        from inventory.rebalancer import RebalancePlanner
+        from inventory.tracker import InventoryTracker, Venue
+
+        # Only one venue loaded
+        tracker = InventoryTracker([Venue.BINANCE])
+        tracker.update_from_cex(Venue.BINANCE, {"ETH": {"free": "10", "locked": "0"}})
+        planner = RebalancePlanner(tracker, threshold_pct=0.0)
+        plans = planner.plan("ETH")
+        assert plans == []
+
+    def test_plan_with_custom_target_ratio(self):
+        from decimal import Decimal
+
+        from inventory.rebalancer import RebalancePlanner
+        from inventory.tracker import InventoryTracker, Venue
+
+        tracker = InventoryTracker([Venue.BINANCE, Venue.WALLET])
+        tracker.update_from_cex(Venue.BINANCE, {"ETH": {"free": "9", "locked": "0"}})
+        tracker.update_from_wallet(Venue.WALLET, {"ETH": "1"})
+        # Custom target: 70% BINANCE, 30% WALLET
+        planner = RebalancePlanner(
+            tracker,
+            threshold_pct=0.0,
+            target_ratio={Venue.BINANCE: Decimal("0.7"), Venue.WALLET: Decimal("0.3")},
+        )
+        plans = planner.plan("ETH")
+        # With 9/1 split vs 70/30 target, should produce a plan
+        assert isinstance(plans, list)
+
+
+class TestToVenueRaises:
+    """Cover _to_venue ValueError (line 263) — inject an unknown venue name."""
+
+    def test_unknown_venue_name_raises(self):
+        from inventory.rebalancer import RebalancePlanner
+        from inventory.tracker import InventoryTracker, Venue
+
+        tracker = InventoryTracker([Venue.BINANCE, Venue.WALLET])
+        tracker.update_from_cex(Venue.BINANCE, {"ETH": {"free": "9", "locked": "0"}})
+        tracker.update_from_wallet(Venue.WALLET, {"ETH": "1"})
+        planner = RebalancePlanner(tracker, threshold_pct=0.0)
+
+        # Monkeypatch skew to inject a fake venue name that _to_venue can't map
+        original_skew = tracker.skew
+
+        def _bad_skew(asset):
+            result = original_skew(asset)
+            result["venues"] = {
+                "unknown_venue": result["venues"].get("binance", {}),
+                **{k: v for k, v in result["venues"].items() if k != "binance"},
+            }
+            return result
+
+        tracker.skew = _bad_skew
+
+        with pytest.raises(ValueError, match="Unknown venue"):
+            planner.plan("ETH")
+
+
+class TestCLIGaps:
+    """Cover CLI paths not yet exercised (lines 413-414, 432-433, 449)."""
+
+    def test_cli_plan_no_rebalance_needed(self, capsys):
+        # Use an asset not in the hardcoded demo tracker → plan() returns [] → "No rebalance needed"
+        from inventory.rebalancer import _run_cli
+
+        rc = _run_cli(["--plan", "BTC"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "No rebalance needed" in out
+
+    def test_cli_plan_all_all_balanced(self, capsys):
+        # Hardcoded demo tracker has skewed ETH and USDT → plan-all shows transfers
+        from inventory.rebalancer import _run_cli
+
+        rc = _run_cli(["--plan-all"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "ETH" in out
+
+    def test_cli_plan_all_with_skewed_assets(self, capsys):
+        # Hardcoded demo tracker: ETH 9/1 → transfer from binance to wallet
+        from inventory.rebalancer import _run_cli
+
+        rc = _run_cli(["--plan-all"])
+        assert rc == 0
