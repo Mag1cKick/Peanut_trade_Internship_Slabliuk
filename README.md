@@ -1,8 +1,9 @@
-# Peanut Trade — Weeks 1–3: Core, Chain, Pricing & Exchange Modules
+# Peanut Trade — Weeks 1–4: Core, Chain, Pricing, Exchange & Live Trading Modules
 
 > Arbitrage trading system — wallet management, blockchain interaction,
 > transaction building, on-chain DEX pricing, CEX order book analysis,
-> multi-venue inventory tracking, and end-to-end arb opportunity detection.
+> multi-venue inventory tracking, real-time WebSocket order book streaming,
+> PnL tracking, live dashboard, and end-to-end arb opportunity detection.
 
 ---
 
@@ -20,20 +21,26 @@ make install
 cp .env.example .env
 # Edit .env — add PRIVATE_KEY, RPC_URL, BINANCE_API_KEY, BINANCE_API_SECRET
 
-# 4. Run all 1295 tests
+# 4. Run all 1522 tests
 make test
 
-# 5. CEX order book live snapshot (Binance testnet)
+# 5. Full pipeline demo (offline, no API keys needed)
+python scripts/lab4_demo.py
+
+# 6. CEX order book live snapshot (Binance testnet)
 python -m exchange.orderbook ETH/USDT --depth 20 --qty 2
 
-# 6. Arb opportunity check (mocked DEX price + live CEX)
+# 7. Arb opportunity check (mocked DEX price + live CEX)
 python -m integration.arb_checker ETH/USDT --size 2.0 --dex-price 2007.21
 
-# 7. Venue rebalance check
+# 8. Live WebSocket order book stream (Binance testnet)
+python -m exchange.ws_orderbook ETH/USDT --count 5
+
+# 9. Venue rebalance check
 python -m inventory.rebalancer --check
 
-# 8. P&L dashboard (demo data)
-python -m inventory.pnl --summary
+# 10. P&L dashboard (demo data)
+python -m inventory.dashboard --once
 ```
 
 ---
@@ -137,32 +144,40 @@ PricingEngine.get_quote()             ExchangeClient.fetch_order_book()
 │   ├── impact_analyzer.py       # PriceImpactAnalyzer — slippage tables, max trade size
 │   └── engine.py                # PricingEngine — unified interface + Quote validation
 │
-├── exchange/                    # Week 3 — CEX interaction
+├── exchange/                    # Weeks 3–4 — CEX interaction & live streaming
 │   ├── client.py                # ExchangeClient — Binance testnet, rate limiting, orders
-│   └── orderbook.py             # OrderBookAnalyzer — walk_the_book, depth, imbalance
-│                                #   CLI: python -m exchange.orderbook ETH/USDT
+│   ├── orderbook.py             # OrderBookAnalyzer — walk_the_book, depth, imbalance
+│   │                            #   CLI: python -m exchange.orderbook ETH/USDT
+│   ├── bybit_client.py          # BybitClient — ccxt-backed Bybit adapter [stretch]
+│   └── ws_orderbook.py          # OrderBookStream — Binance WebSocket depth stream [stretch]
+│                                #   Binance sync protocol: WS open → REST snapshot → diffs
+│                                #   CLI: python -m exchange.ws_orderbook ETH/USDT --count 10
 │
-├── inventory/                   # Week 3 — position & balance tracking
+├── inventory/                   # Weeks 3–4 — position tracking, PnL, dashboard
 │   ├── tracker.py               # CostBasisTracker (fills P&L) + InventoryTracker (venues)
 │   │                            #   Venue enum, Balance dataclass, skew analysis
-│   ├── pnl.py                   # PositionPnLEngine (cost-basis) + PnLEngine (arb ledger)
-│   │                            #   TradeLeg, ArbRecord, summary(), export_csv()
+│   ├── pnl.py                   # PnLEngine — TradeLeg, ArbRecord, summary(), export_csv()
 │   │                            #   CLI: python -m inventory.pnl --summary
-│   └── rebalancer.py            # WeightRebalancePlanner + RebalancePlanner (venue-aware)
-│                                #   TransferPlan, TRANSFER_FEES, MIN_OPERATING_BALANCE
-│                                #   CLI: python -m inventory.rebalancer --check
+│   ├── rebalancer.py            # RebalancePlanner — venue-aware transfer plans
+│   │                            #   TransferPlan, TRANSFER_FEES, MIN_OPERATING_BALANCE
+│   │                            #   CLI: python -m inventory.rebalancer --check
+│   ├── dashboard.py             # InventoryDashboard — Rich live terminal UI [stretch]
+│   │                            #   CLI: python -m inventory.dashboard --once
+│   └── charts.py                # PnLCharts — matplotlib cumulative PnL, drawdown [stretch]
+│                                #   CLI: python -m inventory.charts --output charts/
 │
-├── integration/                 # Week 3 — pipeline integration
-│   └── arb_checker.py           # ArbChecker — DEX + CEX + inventory → opportunity dict
-│                                #   SimplePricingAdapter for testing/demo
-│                                #   CLI: python -m integration.arb_checker ETH/USDT
+├── integration/                 # Weeks 3–4 — full pipeline
+│   ├── arb_checker.py           # ArbChecker — DEX + CEX + inventory → opportunity dict
+│   │                            #   PricingEngineAdapter — wires Week 2 PricingEngine
+│   │                            #   SimplePricingAdapter — lightweight shim for testing
+│   │                            #   CLI: python -m integration.arb_checker ETH/USDT
+│   └── arb_logger.py            # ArbLogger — ring buffer + CSV export of arb results
+│                                #   CLI: python -m integration.arb_logger ETH/USDT
 │
-├── strategy/                    # Week 4 placeholder
-├── executor/                    # Week 4 placeholder
 ├── safety/                      # Week 5 placeholder
 ├── config/                      # Week 5 placeholder
 │
-├── tests/                       # 1295 unit tests, all passing
+├── tests/                       # 1522 unit tests, all passing, 99% coverage
 │   ├── test_wallet.py           # 37  — key loading, security, signing
 │   ├── test_serializer.py       # 55  — determinism, unicode, edge cases
 │   ├── test_types.py            # 68  — validation, arithmetic, equality
@@ -184,11 +199,18 @@ PricingEngine.get_quote()             ExchangeClient.fetch_order_book()
 │   ├── test_order_book.py       # 24  — legacy OrderBookAnalyzer
 │   ├── test_inventory.py        # 78  — CostBasisTracker, WeightRebalancePlanner, PnL
 │   ├── test_multi_venue_tracker.py # 52 — InventoryTracker, can_execute, skew
-│   ├── test_rebalancer.py       # 46  — RebalancePlanner, TransferPlan, CLI
-│   ├── test_pnl.py              # 58  — ArbRecord, PnLEngine, CSV export, CLI
-│   └── test_arb_checker.py      # 46  — ArbChecker, direction, costs, inventory
+│   ├── test_rebalancer.py       # 67  — RebalancePlanner, TransferPlan, CLI
+│   ├── test_pnl.py              # 65  — ArbRecord, PnLEngine, CSV export, CLI
+│   ├── test_arb_checker.py      # 58  — ArbChecker, direction, costs, inventory, CLI
+│   ├── test_arb_logger.py       # 58  — ArbLogger, ring buffer, CSV, stats
+│   ├── test_bybit_client.py     # 52  — BybitClient, order book, balance, rate limiter
+│   ├── test_dashboard.py        # 26  — InventoryDashboard, Rich tables, live loop
+│   ├── test_charts.py           # 25  — PnLCharts, all chart types, file output
+│   └── test_ws_orderbook.py     # 54  — OrderBookStream, sync protocol, async iter
 │
 ├── scripts/
+│   ├── lab4_demo.py             # Lab 4 full pipeline demo (offline, no API keys)
+│   ├── pricing_demo.py          # Week 2 pricing pipeline demo
 │   ├── integration_test.py      # End-to-end Sepolia test
 │   └── check_secrets_baseline.py
 │
@@ -752,17 +774,275 @@ Verdict: SKIP — costs exceed gap
 
 ---
 
+## Week 4: Live Trading Infrastructure
+
+### BybitClient — ccxt-backed Bybit Adapter
+
+```python
+from exchange.bybit_client import BybitClient
+
+client = BybitClient({
+    "apiKey": "YOUR_BYBIT_KEY",
+    "secret": "YOUR_BYBIT_SECRET",  # pragma: allowlist secret
+    "sandbox": True,
+})
+
+# Order book
+book = client.fetch_order_book("ETH/USDT", limit=25)
+# {symbol, bids: [(price, qty), ...], asks: [...], timestamp}
+
+# Balances
+balances = client.fetch_balance()
+# {"ETH": {"free": Decimal, "locked": Decimal, "total": Decimal}, ...}
+
+# Place / cancel
+order = client.create_limit_order("ETH/USDT", "buy", qty=0.1, price=2000.0)
+client.cancel_order(order["id"], "ETH/USDT")
+
+# Trading fees
+fees = client.get_trading_fees("ETH/USDT")
+# {"maker": Decimal("0.001"), "taker": Decimal("0.001")}
+```
+
+### OrderBookStream — Binance WebSocket Depth
+
+Implements the [Binance depth stream sync protocol](https://developers.binance.com/docs/binance-spot-api-docs/web-socket-streams#how-to-manage-a-local-order-book-correctly):
+1. Open WebSocket stream `wss://.../ws/<symbol>@depth`
+2. Fetch REST snapshot via `GET /api/v3/depth`
+3. Discard diffs with `U ≤ lastUpdateId`; apply the first diff where `U ≤ lastUpdateId+1 ≤ u`
+
+```python
+import asyncio
+from exchange.ws_orderbook import OrderBookStream
+
+async def main():
+    stream = OrderBookStream("ETH/USDT", testnet=True, depth_limit=20)
+    await stream.connect()          # opens WS + fetches REST snapshot
+
+    async for book in stream:       # yields on each depth update
+        print(f"mid={book['mid_price']:.2f}  spread={book['spread_bps']:.1f} bps")
+
+asyncio.run(main())
+```
+
+```bash
+# Stream 10 updates then exit
+python -m exchange.ws_orderbook ETH/USDT --count 10
+```
+
+```
+ETH/USDT — live depth stream (testnet)
+update #1  mid=2,010.25  spread=2.5 bps  bids=20  asks=20
+update #2  mid=2,010.30  spread=2.4 bps  bids=20  asks=20
+...
+```
+
+### InventoryDashboard — Rich Terminal UI
+
+```python
+from inventory.dashboard import InventoryDashboard
+from inventory.tracker import InventoryTracker, Venue
+
+tracker = InventoryTracker([Venue.BINANCE, Venue.WALLET])
+dash = InventoryDashboard(tracker)
+
+dash.render()           # print one snapshot
+dash.run(refresh_interval=5)   # live loop, Ctrl-C to exit
+```
+
+```bash
+python -m inventory.dashboard --once         # single snapshot
+python -m inventory.dashboard --interval 3   # refresh every 3 s
+```
+
+```
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃  Inventory Dashboard  —  2024-01-15 14:30:00 UTC                    ┃
+┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+│ Asset    │  Binance (free) │  Wallet         │  Total           │
+│ ETH      │          3.0000 │         7.0000  │        10.0000   │
+│ USDT     │       6000.0000 │      4000.0000  │     10000.0000   │
+├──────────┴─────────────────┴─────────────────┴──────────────────┤
+│ Skew: ETH  40.0% deviation  ⚠ REBALANCE NEEDED                  │
+│ Skew: USDT 20.0% deviation  ✓                                    │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### PnLCharts — Matplotlib Visualizations
+
+```python
+from inventory.charts import PnLCharts
+from inventory.pnl import PnLEngine
+
+engine = PnLEngine()
+# ... record trades ...
+
+charts = PnLCharts(engine)
+charts.plot_cumulative_pnl(output_path="charts/cumulative_pnl.png")
+charts.plot_drawdown(output_path="charts/drawdown.png")
+charts.plot_pnl_by_hour(output_path="charts/hourly.png")
+charts.plot_all(output_dir="charts/")
+```
+
+```bash
+python -m inventory.charts --output charts/
+# Saved: charts/cumulative_pnl.png
+# Saved: charts/drawdown.png
+# Saved: charts/pnl_by_hour.png
+```
+
+### ArbLogger — Ring Buffer + CSV Export
+
+```python
+from integration.arb_logger import ArbLogger
+
+logger = ArbLogger(max_records=1000)
+
+# Log arb check results
+logger.log(result)          # result from ArbChecker.check()
+logger.log(result2)
+
+# Stats
+stats = logger.stats()
+# {total, executable_count, executable_pct, avg_gap_bps, avg_net_pnl_bps,
+#  best_opportunity, worst_opportunity}
+
+# Export
+logger.export_csv("arb_log.csv")
+
+# Recent (last N)
+recent = logger.recent(10)
+```
+
+```bash
+# Continuously poll and log arb opportunities
+python -m integration.arb_logger ETH/USDT --interval 5 --count 20
+```
+
+### PricingEngineAdapter — Wiring Week 2 into ArbChecker
+
+`PricingEngineAdapter` bridges the Week 2 `PricingEngine` (raw int AMM math) to the
+`{price, price_impact_bps, fee_bps}` dict that `ArbChecker` expects:
+
+```python
+from integration.arb_checker import ArbChecker, PricingEngineAdapter
+from pricing.engine import PricingEngine
+from core.types import Token, Address
+
+# Set up the real on-chain pricing engine
+engine = PricingEngine(chain_client=client, fork_url="http://127.0.0.1:8545")
+engine.load_pools([Address("0xB4e16d0168e52d35CaCD2c6185b44281Ec28C9Dc")])
+
+WETH = Token(address=Address("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"),
+             symbol="WETH", decimals=18)
+USDC = Token(address=Address("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"),
+             symbol="USDC", decimals=6)
+
+# Wrap it
+adapter = PricingEngineAdapter(
+    engine=engine,
+    token_in=WETH,
+    token_out=USDC,
+    decimals_in=18,
+    decimals_out=6,
+    dex_fee_bps=30,
+    gas_price_gwei=20,
+)
+
+# Wire into ArbChecker — now uses real AMM quotes
+checker = ArbChecker(
+    pricing_engine=adapter,
+    exchange_client=cex_client,
+    inventory_tracker=tracker,
+)
+
+result = checker.check("ETH/USDT", size=2.0)
+# execution_price comes from PricingEngine.get_quote() → Quote.expected_output
+# price_impact_bps = (simulated_output - expected_output) / simulated_output × 10000
+```
+
+### Lab 4 Full Pipeline Demo
+
+```bash
+python scripts/lab4_demo.py
+```
+
+Runs entirely offline (no API keys needed) — mocks CEX and WebSocket calls:
+
+```
+════════════════════════════════════════════════════
+  Lab 4 Full Pipeline Demo
+════════════════════════════════════════════════════
+
+[1] InventoryTracker — multi-venue balances ...
+    ETH: binance=3.00, wallet=7.00, total=10.00
+    USDT: binance=6000.00, wallet=4000.00, total=10000.00
+
+[2] RebalancePlanner — skew check ...
+    ETH — 40.0% deviation — REBALANCE NEEDED
+    Plan: binance→wallet 2.0 ETH  fee=0.005 ETH  net=1.995 ETH
+
+[3] PnLEngine — arb trade ledger ...
+    Net PnL: $1.00  (5.0 bps)  win_rate=75.0%
+
+[4] ArbChecker — full pipeline ...
+    gap=38.8 bps  costs=44.1 bps  net=-5.3 bps  executable=False
+
+[5] OrderBookAnalyzer — walk the book ...
+    mid=2010.25  spread=2.49 bps  depth_bid=47.2 ETH
+
+[6] ArbLogger — ring buffer ...
+    Logged 3 results. executable=1 (33.3%)  avg_gap=35.0 bps
+
+[7] InventoryDashboard — terminal UI ...
+    [Rich table printed]
+
+[8] PnLCharts — matplotlib (skipped — no display) ...
+
+[9] BybitClient — ccxt adapter ...
+    Fetched mock order book: best_bid=2009.50, best_ask=2010.00
+
+[10] OrderBookStream — WebSocket depth ...
+     Snapshot applied: 5 bids, 5 asks, last_update_id=100
+
+════════════════════════════════════════════════════
+  All 10 sections completed successfully
+════════════════════════════════════════════════════
+```
+
+---
+
 ## Running Tests
 
 ```bash
-make test                                        # run all 1295 tests
-python -m pytest tests/test_exchange_client.py -v   # CEX client
+make test                                            # run all 1522 tests (99% coverage)
+
+# Week 1 — core, chain
+python -m pytest tests/test_wallet.py tests/test_types.py tests/test_serializer.py -v
+python -m pytest tests/test_client.py tests/test_builder.py tests/test_analyzer.py -v
+
+# Week 2 — pricing
+python -m pytest tests/test_amm.py tests/test_router.py tests/test_pricing_engine.py -v
+python -m pytest tests/test_fork_simulator.py tests/test_arbitrage.py -v
+
+# Week 3 — exchange, inventory, integration
+python -m pytest tests/test_exchange_client.py -v   # CEX client (95 tests)
 python -m pytest tests/test_orderbook.py -v         # order book analysis
 python -m pytest tests/test_multi_venue_tracker.py  # inventory tracking
 python -m pytest tests/test_rebalancer.py -v        # rebalance planner
 python -m pytest tests/test_pnl.py -v               # P&L engine
-python -m pytest tests/test_arb_checker.py -v       # integration
+python -m pytest tests/test_arb_checker.py -v       # integration pipeline
+
+# Week 4 — live trading infrastructure (stretch)
+python -m pytest tests/test_bybit_client.py -v      # BybitClient (52 tests)
+python -m pytest tests/test_ws_orderbook.py -v      # WebSocket stream (54 tests)
+python -m pytest tests/test_dashboard.py -v         # Rich terminal UI (26 tests)
+python -m pytest tests/test_charts.py -v            # PnL charts (25 tests)
+python -m pytest tests/test_arb_logger.py -v        # ArbLogger (58 tests)
+
+# Filter
 python -m pytest -k "test_security" -v              # by name pattern
+python -m pytest --tb=short --cov=. --cov-report=term-missing  # with coverage
 ```
 
 ---
@@ -797,7 +1077,7 @@ PRIVATE_KEY=0x... python scripts/integration_test.py --dry-run
 | Command | What it does |
 |---|---|
 | `make install` | Install all dependencies |
-| `make test` | Run all 342 tests |
+| `make test` | Run all 1522 tests (99% coverage) |
 | `make lint` | Lint with ruff |
 | `make format` | Auto-format with ruff |
 | `make pre-commit-install` | Wire up git hooks |

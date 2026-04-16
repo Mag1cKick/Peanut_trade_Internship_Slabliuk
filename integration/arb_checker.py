@@ -189,6 +189,101 @@ class ArbChecker:
         }
 
 
+class PricingEngineAdapter:
+    """
+    Wraps the Week 2 ``PricingEngine`` so it satisfies the ArbChecker interface.
+
+    The PricingEngine operates on raw token amounts (integers with decimals) and
+    returns a ``Quote`` with ``expected_output`` and ``gas_estimate``.  This
+    adapter converts those values into the price/impact/fee dict that ArbChecker
+    expects.
+
+    Usage::
+
+        from pricing.engine import PricingEngine
+        from integration.arb_checker import ArbChecker, PricingEngineAdapter
+
+        adapter = PricingEngineAdapter(
+            engine=pricing_engine,
+            token_in=eth_token,
+            token_out=usdt_token,
+            decimals_in=18,
+            decimals_out=6,
+            dex_fee_bps=Decimal("30"),
+        )
+        checker = ArbChecker(
+            pricing_engine=adapter,
+            exchange_client=cex_client,
+            inventory_tracker=tracker,
+        )
+    """
+
+    def __init__(
+        self,
+        engine,
+        token_in,
+        token_out,
+        decimals_in: int = 18,
+        decimals_out: int = 6,
+        dex_fee_bps: Decimal = _DEFAULT_DEX_FEE_BPS,
+        gas_price_gwei: int = 20,
+    ) -> None:
+        self._engine = engine
+        self._token_in = token_in
+        self._token_out = token_out
+        self._decimals_in = decimals_in
+        self._decimals_out = decimals_out
+        self._fee_bps = dex_fee_bps
+        self._gas_price_gwei = gas_price_gwei
+
+    def get_dex_price(self, _base: str, _quote: str, size: Decimal) -> dict:
+        """
+        Call PricingEngine.get_quote() and return a normalised price dict.
+
+        The execution price is derived from ``expected_output / amount_in``
+        (both adjusted to human-readable units).  Price impact is estimated
+        from the divergence between the AMM quote and the fork simulation.
+        """
+        scale_in = Decimal(10**self._decimals_in)
+        scale_out = Decimal(10**self._decimals_out)
+
+        amount_in_raw = int(size * scale_in)
+
+        try:
+            quote = self._engine.get_quote(
+                self._token_in,
+                self._token_out,
+                amount_in_raw,
+                self._gas_price_gwei,
+            )
+        except Exception as exc:
+            raise RuntimeError(f"PricingEngine.get_quote failed: {exc}") from exc
+
+        amount_in_human = Decimal(amount_in_raw) / scale_in
+        expected_out_human = Decimal(quote.expected_output) / scale_out
+        simulated_out_human = Decimal(quote.simulated_output) / scale_out
+
+        if amount_in_human == 0:
+            execution_price = Decimal("0")
+        else:
+            execution_price = expected_out_human / amount_in_human
+
+        # Price impact: how much worse the simulated fill is vs. the AMM quote
+        if simulated_out_human > 0:
+            impact = (
+                (simulated_out_human - expected_out_human) / simulated_out_human * Decimal("10000")
+            )
+            impact_bps = max(Decimal("0"), impact)
+        else:
+            impact_bps = Decimal("0")
+
+        return {
+            "price": execution_price,
+            "price_impact_bps": impact_bps,
+            "fee_bps": self._fee_bps,
+        }
+
+
 class SimplePricingAdapter:
     """
     Minimal pricing_engine shim that satisfies the ArbChecker interface.
