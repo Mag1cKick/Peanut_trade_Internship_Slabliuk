@@ -522,7 +522,7 @@ bash scripts/start_fork.sh          # starts Anvil on http://127.0.0.1:8545
 from exchange.client import ExchangeClient
 
 client = ExchangeClient({
-    "apiKey": "YOUR_BINANCE_TESTNET_KEY",
+    "apiKey": "YOUR_BINANCE_TESTNET_KEY",  # pragma: allowlist secret
     "secret": "YOUR_BINANCE_TESTNET_SECRET",  # pragma: allowlist secret
     "sandbox": True,
     "enableRateLimit": True,
@@ -782,7 +782,7 @@ Verdict: SKIP — costs exceed gap
 from exchange.bybit_client import BybitClient
 
 client = BybitClient({
-    "apiKey": "YOUR_BYBIT_KEY",
+    "apiKey": "YOUR_BYBIT_KEY",  # pragma: allowlist secret
     "secret": "YOUR_BYBIT_SECRET",  # pragma: allowlist secret
     "sandbox": True,
 })
