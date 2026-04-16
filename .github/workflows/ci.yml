@@ -7,8 +7,11 @@ on:
     branches: [main]
 
 jobs:
+  # ─────────────────────────────────────────────────────────────────────────
+  # Job 1: Lint + unit tests (no API keys required)
+  # ─────────────────────────────────────────────────────────────────────────
   test:
-    name: Lint & Test (Python ${{ matrix.python-version }})
+    name: Lint & Unit Tests (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
 
     strategy:
@@ -30,17 +33,64 @@ jobs:
           pip install -r requirements.txt
           pip install -r requirements-dev.txt
 
-      # ── Secrets check ─────────────────────────────────────────────────────
+      # ── Secrets check ────────────────────────────────────────────────────
       - name: Check for accidentally committed secrets
         run: python scripts/check_secrets_baseline.py
 
-      # ── Lint ──────────────────────────────────────────────────────────────
+      # ── Lint (all modules) ───────────────────────────────────────────────
       - name: Lint (ruff)
-        run: python -m ruff check core/ chain/ tests/
+        run: |
+          python -m ruff check \
+            core/ chain/ pricing/ exchange/ inventory/ integration/ \
+            tests/ scripts/
 
       - name: Format check (ruff)
-        run: python -m ruff format --check core/ chain/ tests/
+        run: |
+          python -m ruff format --check \
+            core/ chain/ pricing/ exchange/ inventory/ integration/ \
+            tests/ scripts/
 
-      # ── Tests ─────────────────────────────────────────────────────────────
-      - name: Run tests
-        run: python -m pytest tests/ -v --tb=short --cov=core --cov=chain --cov-report=term-missing
+      # ── Unit tests (tests/live/ excluded via pyproject.toml) ─────────────
+      - name: Run unit tests
+        run: |
+          python -m pytest tests/ \
+            --tb=short \
+            --cov=core --cov=chain --cov=pricing \
+            --cov=exchange --cov=inventory --cov=integration \
+            --cov-report=term-missing \
+            --cov-fail-under=90
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Job 2: Live integration tests (Binance testnet — requires secrets)
+  # ─────────────────────────────────────────────────────────────────────────
+  live:
+    name: Live Integration Tests (Binance testnet)
+    runs-on: ubuntu-latest
+    # Only run on pushes/PRs where secrets are available (not forks)
+    if: >
+      github.event_name == 'push' ||
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name == github.repository)
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Run live integration tests
+        env:
+          BINANCE_API_KEY: ${{ secrets.BINANCE_API_KEY }}
+          BINANCE_API_SECRET: ${{ secrets.BINANCE_API_SECRET }}
+        run: |
+          python -m pytest tests/live/ -v -s --tb=short \
+            --override-ini="addopts=-v --tb=short"
