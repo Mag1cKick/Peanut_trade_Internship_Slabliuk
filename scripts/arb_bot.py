@@ -5,6 +5,7 @@ Week 1: ChainClient (optional, gated by rpc_url config)
 Week 2: PricingEngine (optional, gated by rpc_url config)
 Week 3: ExchangeClient, InventoryTracker, PnLEngine
 Week 4: SignalGenerator, SignalScorer, Executor, FeeStructure
+Stretch: SignalQueue (priority queue), Prometheus metrics, webhook alerts
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ import asyncio
 import logging
 import os
 import sys
+import time
 from datetime import datetime
 from decimal import Decimal
 
@@ -20,8 +22,20 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from exchange.client import ExchangeClient
 from executor.engine import ExecutionContext, Executor, ExecutorConfig, ExecutorState
+from executor.queue import SignalQueue
 from inventory.pnl import ArbRecord, PnLEngine, TradeLeg
 from inventory.tracker import InventoryTracker, Venue
+from monitoring.metrics import (
+    CIRCUIT_BREAKER_OPEN,
+    EXECUTION_LATENCY,
+    PNL_USD,
+    SIGNAL_SCORE,
+    SIGNALS_GENERATED,
+    SIGNALS_SKIPPED,
+    SPREAD_BPS,
+    TRADES_EXECUTED,
+    start_metrics_server,
+)
 from strategy.fees import FeeStructure
 from strategy.generator import SignalGenerator
 from strategy.scorer import SignalScorer
@@ -74,11 +88,19 @@ class ArbBot:
         self.pairs: list[str] = config.get("pairs", ["ETH/USDT"])
         self.trade_size: float = config.get("trade_size", 0.1)
         self.score_threshold: float = config.get("score_threshold", 60.0)
+        self.metrics_port: int = config.get("metrics_port", 0)  # 0 = disabled
         self.running = False
+
+        # Priority queue: holds scored signals waiting for execution
+        self._queue: SignalQueue = SignalQueue(maxsize=config.get("queue_maxsize", 50))
 
     async def run(self) -> None:
         self.running = True
         log.info("Bot starting...")
+
+        if self.metrics_port:
+            start_metrics_server(self.metrics_port)
+
         await self._sync_balances()
 
         while self.running:
@@ -91,18 +113,28 @@ class ArbBot:
 
     async def _tick(self) -> None:
         cb = self.executor.circuit_breaker
+
+        # Update circuit-breaker gauge for Prometheus
+        CIRCUIT_BREAKER_OPEN.set(1 if cb.is_open() else 0)
+
         if cb.is_open():
             log.info("Circuit breaker open — %.0fs until reset", cb.time_until_reset())
             return
 
+        # Phase 1: generate + score all pairs, enqueue by priority
         for pair in self.pairs:
             signal = self.generator.generate(pair, self.trade_size)
             if signal is None:
                 continue
 
+            SIGNALS_GENERATED.labels(pair=pair).inc()
+            SPREAD_BPS.labels(pair=pair).observe(signal.spread_bps)
+
             signal.score = self.scorer.score(signal, self.inventory.get_skews())
+            SIGNAL_SCORE.labels(pair=pair).observe(signal.score)
 
             if signal.score < self.score_threshold:
+                SIGNALS_SKIPPED.labels(pair=pair, reason="low_score").inc()
                 log.info(
                     "Skipped: score below threshold (%.1f < %.1f)",
                     signal.score,
@@ -110,30 +142,51 @@ class ArbBot:
                 )
                 continue
 
+            self._queue.put(signal)
+
+        # Phase 2: drain the queue highest-score-first
+        while True:
+            signal = self._queue.get()
+            if signal is None:
+                break
+
             log.info(
                 "Signal: %s spread=%.1fbps score=%.0f",
-                pair,
+                signal.pair,
                 signal.spread_bps,
                 signal.score,
             )
 
+            t0 = time.monotonic()
             ctx = await self.executor.execute(signal)
-            self.scorer.record_result(pair, ctx.state == ExecutorState.DONE)
+            latency = time.monotonic() - t0
+
+            EXECUTION_LATENCY.labels(pair=signal.pair).observe(latency)
+            TRADES_EXECUTED.labels(
+                pair=signal.pair,
+                state="done" if ctx.state == ExecutorState.DONE else "failed",
+            ).inc()
+            self.scorer.record_result(signal.pair, ctx.state == ExecutorState.DONE)
 
             if ctx.state == ExecutorState.DONE and ctx.actual_net_pnl is not None:
+                PNL_USD.labels(pair=signal.pair).observe(ctx.actual_net_pnl)
                 arb_record = execution_to_arb_record(ctx)
                 self.pnl_engine.record(arb_record)
                 log.info("SUCCESS: PnL=$%.2f", ctx.actual_net_pnl)
             else:
-                failures = len([t for t in cb.failures]) if hasattr(cb, "failures") else "?"
                 log.warning("FAILED: %s", ctx.error)
                 log.warning(
-                    "Circuit breaker: %s/%s failures",
-                    failures,
-                    cb.config.failure_threshold if hasattr(cb, "config") else "?",
+                    "Circuit breaker: %d/%d failures",
+                    len(cb.failures),
+                    cb.config.failure_threshold,
                 )
 
             await self._sync_balances()
+
+            # Stop draining if breaker just tripped
+            if cb.is_open():
+                CIRCUIT_BREAKER_OPEN.set(1)
+                break
 
     async def _sync_balances(self) -> None:
         try:
@@ -205,6 +258,7 @@ if __name__ == "__main__":
         "pairs": ["ETH/USDT"],
         "trade_size": 0.1,
         "simulation": True,
+        "metrics_port": int(os.getenv("METRICS_PORT", "8000")),
     }
     bot = ArbBot(config)
     asyncio.run(bot.run())

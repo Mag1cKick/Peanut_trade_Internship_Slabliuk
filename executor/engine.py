@@ -14,6 +14,7 @@ import time
 from dataclasses import dataclass, field
 from enum import Enum, auto
 
+from executor.recovery import CircuitBreaker, ReplayProtection
 from strategy.signal import Direction, Signal
 
 
@@ -56,54 +57,6 @@ class ExecutorConfig:
     min_fill_ratio: float = 0.8
     use_flashbots: bool = True
     simulation_mode: bool = True
-
-
-class CircuitBreaker:
-    """
-    Open after too many consecutive failures; auto-resets after a cooldown.
-    """
-
-    def __init__(self, failure_threshold: int = 3, reset_seconds: float = 60.0) -> None:
-        self.failure_threshold = failure_threshold
-        self.reset_seconds = reset_seconds
-        self._consecutive_failures = 0
-        self._opened_at: float | None = None
-
-    def is_open(self) -> bool:
-        if self._opened_at is None:
-            return False
-        if time.time() - self._opened_at >= self.reset_seconds:
-            self._opened_at = None
-            self._consecutive_failures = 0
-            return False
-        return True
-
-    def record_success(self) -> None:
-        self._consecutive_failures = 0
-        self._opened_at = None
-
-    def record_failure(self) -> None:
-        self._consecutive_failures += 1
-        if self._consecutive_failures >= self.failure_threshold:
-            self._opened_at = time.time()
-
-    def trip(self) -> None:
-        """Manually open the breaker (useful for tests)."""
-        self._opened_at = time.time() - 1.0
-        self._consecutive_failures = self.failure_threshold
-
-
-class ReplayProtection:
-    """Prevent the same signal from executing more than once."""
-
-    def __init__(self) -> None:
-        self._executed: set[str] = set()
-
-    def is_duplicate(self, signal: Signal) -> bool:
-        return signal.signal_id in self._executed
-
-    def mark_executed(self, signal: Signal) -> None:
-        self._executed.add(signal.signal_id)
 
 
 class Executor:
@@ -295,7 +248,105 @@ class Executor:
         if self.config.simulation_mode:
             await asyncio.sleep(0.05)
             return {"success": True, "price": signal.dex_price * 0.9998, "filled": size}
-        raise NotImplementedError("Real DEX execution requires Week 2 integration")
+        return await asyncio.get_event_loop().run_in_executor(
+            None, self._execute_dex_leg_sync, signal, size
+        )
+
+    def _execute_dex_leg_sync(self, signal: Signal, size: float) -> dict:
+        """
+        Real DEX execution via PricingEngine (Week 2) + ChainClient (Week 1).
+
+        Flow:
+          1. Get a swap quote from PricingEngine to find the best route and
+             expected output (with slippage guard).
+          2. Build swapExactTokensForTokens calldata using the route path.
+          3. Sign and broadcast via ChainClient; wait for receipt.
+
+        Requires executor to have been constructed with a live pricing_module
+        (PricingEngine) and a chain_client attribute on the pricing_module.
+        Also requires config.wallet (WalletManager) and config.slippage_bps.
+        """
+        from pricing.engine import PricingEngine
+
+        if not isinstance(self.pricing, PricingEngine):
+            raise RuntimeError("Real DEX execution requires a live PricingEngine")
+
+        wallet = getattr(self.config, "wallet", None)
+        if wallet is None:
+            raise RuntimeError("ExecutorConfig.wallet must be set for live DEX execution")
+
+        slippage_bps: int = getattr(self.config, "slippage_bps", 50)
+
+        # Resolve token objects via the generator's _get_token convention
+        base, quote = signal.pair.split("/")
+        if signal.direction == Direction.BUY_CEX_SELL_DEX:
+            # Selling base on DEX: token_in=base, token_out=quote
+            token_in = self.pricing.get_token(base)
+            token_out = self.pricing.get_token(quote)
+        else:
+            # Selling quote on DEX: token_in=quote, token_out=base
+            token_in = self.pricing.get_token(quote)
+            token_out = self.pricing.get_token(base)
+
+        amount_in = int(size * 10**token_in.decimals)
+
+        try:
+            quote_result = self.pricing.get_quote(token_in, token_out, amount_in)
+        except Exception as exc:
+            return {"success": False, "error": f"Quote failed: {exc}"}
+
+        if not quote_result.is_valid:
+            return {"success": False, "error": "Quote invalid (stale reserves)"}
+
+        min_out = int(quote_result.expected_output * (10_000 - slippage_bps) / 10_000)
+
+        # Build swap path as list of checksum addresses
+        path = [t.address.checksum for t in quote_result.route.path]
+
+        # ABI-encode swapExactTokensForTokens calldata
+        from pricing.fork_simulator import abi_encode
+
+        _SEL_SWAP = bytes.fromhex("38ed1739")
+        deadline = int(time.time()) + 120
+        calldata = _SEL_SWAP + abi_encode(
+            ["uint256", "uint256", "address[]", "address", "uint256"],
+            [amount_in, min_out, path, wallet.address, deadline],
+        )
+
+        # Build, sign, and broadcast the transaction
+        from chain.builder import TransactionBuilder
+        from core.types import Address, TokenAmount
+
+        router = Address("0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D")
+        chain_client = self.pricing.client
+
+        try:
+            tx = (
+                TransactionBuilder(chain_client, wallet)
+                .to(router)
+                .value(TokenAmount(raw=0, decimals=18, symbol="ETH"))
+                .data(calldata)
+                .build()
+            )
+            signed = wallet.sign_transaction(tx.to_dict())
+            tx_hash = chain_client.send_transaction(signed.rawTransaction)
+            receipt = chain_client.wait_for_receipt(tx_hash, timeout=self.config.leg2_timeout)
+        except Exception as exc:
+            return {"success": False, "error": f"DEX tx failed: {exc}"}
+
+        if not receipt or receipt.get("status") != 1:
+            return {"success": False, "error": "DEX tx reverted"}
+
+        # Derive effective fill price from expected output
+        amount_out = quote_result.expected_output
+        effective_price = (amount_out / 10**token_out.decimals) / size
+
+        return {
+            "success": True,
+            "price": effective_price,
+            "filled": size,
+            "tx_hash": tx_hash,
+        }
 
     async def _unwind(self, ctx: ExecutionContext) -> None:
         """Market sell to flatten stuck position."""

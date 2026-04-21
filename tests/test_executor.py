@@ -9,13 +9,12 @@ from unittest.mock import patch
 import pytest
 
 from executor.engine import (
-    CircuitBreaker,
     ExecutionContext,
     Executor,
     ExecutorConfig,
     ExecutorState,
-    ReplayProtection,
 )
+from executor.recovery import CircuitBreaker, CircuitBreakerConfig
 from strategy.signal import Direction, Signal
 
 # ---------------------------------------------------------------------------
@@ -86,79 +85,6 @@ class TestExecutionContext:
         assert ctx.finished_at is None
         assert ctx.actual_net_pnl is None
         assert ctx.error is None
-
-
-# ---------------------------------------------------------------------------
-# CircuitBreaker
-# ---------------------------------------------------------------------------
-
-
-class TestCircuitBreaker:
-    def test_closed_by_default(self):
-        cb = CircuitBreaker()
-        assert not cb.is_open()
-
-    def test_opens_after_threshold_failures(self):
-        cb = CircuitBreaker(failure_threshold=3)
-        cb.record_failure()
-        cb.record_failure()
-        assert not cb.is_open()
-        cb.record_failure()
-        assert cb.is_open()
-
-    def test_success_resets_counter(self):
-        cb = CircuitBreaker(failure_threshold=3)
-        cb.record_failure()
-        cb.record_failure()
-        cb.record_success()
-        cb.record_failure()
-        cb.record_failure()
-        assert not cb.is_open()
-
-    def test_trip_opens_immediately(self):
-        cb = CircuitBreaker()
-        cb.trip()
-        assert cb.is_open()
-
-    def test_auto_resets_after_cooldown(self):
-        cb = CircuitBreaker(failure_threshold=1, reset_seconds=0.05)
-        cb.record_failure()  # opens via normal path, _opened_at = now
-        assert cb.is_open()
-        time.sleep(0.06)
-        assert not cb.is_open()
-
-    def test_success_after_open_closes(self):
-        cb = CircuitBreaker()
-        cb.trip()
-        cb.record_success()
-        assert not cb.is_open()
-
-
-# ---------------------------------------------------------------------------
-# ReplayProtection
-# ---------------------------------------------------------------------------
-
-
-class TestReplayProtection:
-    def test_new_signal_is_not_duplicate(self):
-        rp = ReplayProtection()
-        sig = _make_signal()
-        assert not rp.is_duplicate(sig)
-
-    def test_executed_signal_is_duplicate(self):
-        rp = ReplayProtection()
-        sig = _make_signal()
-        rp.mark_executed(sig)
-        assert rp.is_duplicate(sig)
-
-    def test_different_signals_independent(self):
-        rp = ReplayProtection()
-        sig_a = _make_signal(pair="ETH/USDT")
-        sig_b = _make_signal(pair="BTC/USDT")
-        sig_a.signal_id = "sigA"
-        sig_b.signal_id = "sigB"
-        rp.mark_executed(sig_a)
-        assert not rp.is_duplicate(sig_b)
 
 
 # ---------------------------------------------------------------------------
@@ -401,7 +327,7 @@ class TestCircuitBreakerBlocks:
     async def test_failures_eventually_trip_breaker(self):
         """Repeated failures open the circuit breaker."""
         executor = _make_executor(use_flashbots=False)
-        executor.circuit_breaker = CircuitBreaker(failure_threshold=2)
+        executor.circuit_breaker = CircuitBreaker(CircuitBreakerConfig(failure_threshold=2))
 
         async def fail_cex(*_a, **_kw):
             return {"success": False, "error": "rejected"}
@@ -417,7 +343,7 @@ class TestCircuitBreakerBlocks:
     @pytest.mark.asyncio
     async def test_success_resets_circuit_breaker(self):
         executor = _make_executor(use_flashbots=False)
-        executor.circuit_breaker = CircuitBreaker(failure_threshold=3)
+        executor.circuit_breaker = CircuitBreaker(CircuitBreakerConfig(failure_threshold=3))
         executor.circuit_breaker.record_failure()
         executor.circuit_breaker.record_failure()
 
