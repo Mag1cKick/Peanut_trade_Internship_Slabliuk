@@ -43,6 +43,8 @@ class Signal:
     inventory_ok: bool
     within_limits: bool
 
+    bid_ask_spread_bps: float = 0.0
+
     @classmethod
     def create(cls, pair: str, direction: Direction, **kwargs) -> Signal:
         """

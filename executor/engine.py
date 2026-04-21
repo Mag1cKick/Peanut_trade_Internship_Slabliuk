@@ -88,6 +88,12 @@ class Executor:
         if self.replay_protection.is_duplicate(signal):
             ctx.state = ExecutorState.FAILED
             ctx.error = "Duplicate signal"
+            try:
+                from monitoring.metrics import REPLAY_BLOCKS
+
+                REPLAY_BLOCKS.inc()
+            except Exception:
+                pass
             return ctx
 
         ctx.state = ExecutorState.VALIDATING
@@ -221,7 +227,7 @@ class Executor:
         ctx.state = ExecutorState.DONE
         return ctx
 
-    async def _execute_cex_leg(self, signal: Signal, size: float = None) -> dict:
+    async def _execute_cex_leg(self, signal: Signal, size: float | None = None) -> dict:
         actual_size = size or signal.size
         if self.config.simulation_mode:
             await asyncio.sleep(0.01)
@@ -350,6 +356,12 @@ class Executor:
 
     async def _unwind(self, ctx: ExecutionContext) -> None:
         """Market sell to flatten stuck position."""
+        try:
+            from monitoring.metrics import UNWINDS
+
+            UNWINDS.labels(pair=ctx.signal.pair).inc()
+        except Exception:
+            pass
         if self.config.simulation_mode:
             await asyncio.sleep(0.01)
             return

@@ -116,6 +116,7 @@ class SignalGenerator:
             cex_price=cex_price,
             dex_price=dex_price,
             spread_bps=spread,
+            bid_ask_spread_bps=prices.get("bid_ask_spread_bps", 0.0),
             size=size,
             expected_gross_pnl=gross_pnl,
             expected_fees=fees_usd,
@@ -152,6 +153,9 @@ class SignalGenerator:
             if cex_bid <= 0 or cex_ask <= 0:
                 return None
 
+            mid = (cex_bid + cex_ask) / 2.0
+            bid_ask_spread_bps = (cex_ask - cex_bid) / mid * 10_000 if mid > 0 else 0.0
+
             if self.pricing is not None:
                 dex_buy, dex_sell = self._dex_prices_from_engine(pair, size)
             else:
@@ -165,6 +169,7 @@ class SignalGenerator:
                 "cex_ask": cex_ask,
                 "dex_buy": dex_buy,
                 "dex_sell": dex_sell,
+                "bid_ask_spread_bps": bid_ask_spread_bps,
             }
 
         except Exception as exc:

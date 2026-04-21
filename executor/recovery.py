@@ -66,6 +66,12 @@ class CircuitBreaker:
     def trip(self) -> None:
         self.tripped_at = time.time()
         log.critical("CIRCUIT BREAKER TRIPPED")
+        try:
+            from monitoring.metrics import CIRCUIT_BREAKER_TRIPS
+
+            CIRCUIT_BREAKER_TRIPS.inc()
+        except Exception:
+            pass
         if self.config.webhook_url:
             self._send_webhook_async(
                 self.config.webhook_url,

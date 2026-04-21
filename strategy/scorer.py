@@ -22,6 +22,7 @@ class ScorerConfig:
 
     excellent_spread_bps: float = 100.0
     min_spread_bps: float = 30.0
+    liquid_spread_threshold_bps: float = 5.0
 
     def __post_init__(self) -> None:
         weights = [
@@ -60,7 +61,7 @@ class SignalScorer:
         """
         scores = {
             "spread": self._score_spread(signal.spread_bps),
-            "liquidity": 80.0,
+            "liquidity": self._score_liquidity(signal.bid_ask_spread_bps),
             "inventory": self._score_inventory(signal, inventory_state),
             "history": self._score_history(signal.pair),
         }
@@ -68,6 +69,15 @@ class SignalScorer:
         result = round(max(0.0, min(100.0, weighted)), 1)
         signal.score = result
         return result
+
+    def _score_liquidity(self, bid_ask_spread_bps: float) -> float:
+        """Tighter CEX bid-ask spread = more liquid = higher score. 0.0 means not available."""
+        if bid_ask_spread_bps <= 0.0:
+            return 80.0  # fallback when bid-ask spread not populated
+        threshold = self.config.liquid_spread_threshold_bps
+        if bid_ask_spread_bps >= threshold:
+            return 0.0
+        return (1.0 - bid_ask_spread_bps / threshold) * 100.0
 
     def _score_spread(self, spread_bps: float) -> float:
         """Linear score: 0 at min_spread_bps, 100 at excellent_spread_bps."""
