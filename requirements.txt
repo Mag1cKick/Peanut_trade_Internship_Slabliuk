@@ -4,3 +4,4 @@ web3==7.6.0
 ccxt>=4.3.0
 matplotlib>=3.7.0
 rich>=13.0.0
+prometheus_client>=0.20.0
