@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import time
+from decimal import Decimal
 from typing import TYPE_CHECKING
 
 from strategy.fees import FeeStructure
@@ -24,7 +25,14 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-_INV_BUFFER = 1.01
+_INV_BUFFER = Decimal("1.01")
+_TEN_THOUSAND = Decimal("10000")
+
+
+def _d(v: object) -> Decimal:
+    if isinstance(v, Decimal):
+        return v
+    return Decimal(str(v))
 
 
 class SignalGenerator:
@@ -66,20 +74,21 @@ class SignalGenerator:
         if prices is None:
             return None
 
-        cex_bid = prices["cex_bid"]
-        cex_ask = prices["cex_ask"]
-        dex_buy = prices["dex_buy"]
-        dex_sell = prices["dex_sell"]
+        cex_bid = _d(prices["cex_bid"])
+        cex_ask = _d(prices["cex_ask"])
+        dex_buy = _d(prices["dex_buy"])
+        dex_sell = _d(prices["dex_sell"])
 
-        spread_a = (dex_sell - cex_ask) / cex_ask * 10_000 if cex_ask > 0 else 0.0
-        spread_b = (cex_bid - dex_buy) / dex_buy * 10_000 if dex_buy > 0 else 0.0
+        spread_a = (dex_sell - cex_ask) / cex_ask * _TEN_THOUSAND if cex_ask > 0 else Decimal("0")
+        spread_b = (cex_bid - dex_buy) / dex_buy * _TEN_THOUSAND if dex_buy > 0 else Decimal("0")
 
-        if spread_a >= spread_b and spread_a >= self.min_spread_bps:
+        min_spread = _d(self.min_spread_bps)
+        if spread_a >= spread_b and spread_a >= min_spread:
             direction = Direction.BUY_CEX_SELL_DEX
             spread = spread_a
             cex_price = cex_ask
             dex_price = dex_sell
-        elif spread_b >= self.min_spread_bps:
+        elif spread_b >= min_spread:
             direction = Direction.BUY_DEX_SELL_CEX
             spread = spread_b
             cex_price = cex_bid
@@ -93,12 +102,13 @@ class SignalGenerator:
             )
             return None
 
-        trade_value = size * cex_price
-        gross_pnl = (spread / 10_000) * trade_value
+        size_d = _d(size)
+        trade_value = size_d * cex_price
+        gross_pnl = (spread / _TEN_THOUSAND) * trade_value
         fees_usd = self.fees.fee_usd(trade_value)
         net_pnl = gross_pnl - fees_usd
 
-        if net_pnl < self.min_profit_usd:
+        if net_pnl < _d(self.min_profit_usd):
             log.debug(
                 "%s net_pnl=%.2f below min_profit_usd=%.2f, skipping",
                 pair,
@@ -107,8 +117,8 @@ class SignalGenerator:
             )
             return None
 
-        inventory_ok = self._check_inventory(pair, direction, size, cex_price)
-        within_limits = trade_value <= self.max_position_usd
+        inventory_ok = self._check_inventory(pair, direction, size_d, cex_price)
+        within_limits = trade_value <= _d(self.max_position_usd)
 
         signal = Signal.create(
             pair=pair,
@@ -117,7 +127,7 @@ class SignalGenerator:
             dex_price=dex_price,
             spread_bps=spread,
             bid_ask_spread_bps=prices.get("bid_ask_spread_bps", 0.0),
-            size=size,
+            size=size_d,
             expected_gross_pnl=gross_pnl,
             expected_fees=fees_usd,
             expected_net_pnl=net_pnl,
@@ -212,7 +222,9 @@ class SignalGenerator:
             "Override _get_token() in a subclass or use pricing=None with the DEX stub."
         )
 
-    def _check_inventory(self, pair: str, direction: Direction, size: float, price: float) -> bool:
+    def _check_inventory(
+        self, pair: str, direction: Direction, size: Decimal, price: Decimal
+    ) -> bool:
         """
         Verify free balances are sufficient for both legs of the trade.
         """
@@ -222,12 +234,12 @@ class SignalGenerator:
         needed_quote = size * price * _INV_BUFFER
 
         if direction == Direction.BUY_CEX_SELL_DEX:
-            cex_quote = float(self.inventory.get_available(Venue.BINANCE, quote))
-            dex_base = float(self.inventory.get_available(Venue.WALLET, base))
+            cex_quote = _d(self.inventory.get_available(Venue.BINANCE, quote))
+            dex_base = _d(self.inventory.get_available(Venue.WALLET, base))
             ok = cex_quote >= needed_quote and dex_base >= size
         else:
-            dex_quote = float(self.inventory.get_available(Venue.WALLET, quote))
-            cex_base = float(self.inventory.get_available(Venue.BINANCE, base))
+            dex_quote = _d(self.inventory.get_available(Venue.WALLET, quote))
+            cex_base = _d(self.inventory.get_available(Venue.BINANCE, base))
             ok = dex_quote >= needed_quote and cex_base >= size
 
         if not ok:
