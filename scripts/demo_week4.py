@@ -1,14 +1,20 @@
 """
 scripts/demo_week4.py — Week 4 live arbitrage pipeline demo.
 
-Fetches real Binance prices every tick and drives the full pipeline:
-  Generator → Scorer → Priority Queue → Executor → PnL Engine → Metrics
+Two modes:
+  Stub DEX  (default)  — CEX prices real, DEX prices = mid × 1.008 stub
+  Real DEX  (--rpc-url) — CEX prices real, DEX prices from live Uniswap V2 pool
 
 Run:
-    python scripts/demo_week4.py                          # 10 ticks, ETH+BTC
-    python scripts/demo_week4.py --ticks 20              # more ticks
-    python scripts/demo_week4.py --pairs ETH/USDT --size 2.0
-    python scripts/demo_week4.py --ticks 0               # run until Ctrl+C
+    python scripts/demo_week4.py                                # stub DEX
+    python scripts/demo_week4.py --rpc-url https://eth.llamarpc.com   # real DEX
+    python scripts/demo_week4.py --ticks 20 --interval 2
+    python scripts/demo_week4.py --ticks 0                      # run until Ctrl+C
+
+Free public RPC endpoints (no API key needed):
+    https://eth.llamarpc.com
+    https://ethereum.publicnode.com
+    https://cloudflare-eth.com
 """
 
 from __future__ import annotations
@@ -57,6 +63,156 @@ BINANCE_SYMBOLS = {
 
 
 # ---------------------------------------------------------------------------
+# Lightweight Uniswap V2 pricer — queries pool reserves via raw JSON-RPC.
+# Implements the same get_token() / get_quote() interface the generator uses
+# so it can be dropped in as pricing_module without the full PricingEngine.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _Token:
+    symbol: str
+    decimals: int
+
+
+@dataclass
+class _Quote:
+    expected_output: int
+
+
+class SimpleUniswapPricer:
+    """
+    Minimal Uniswap V2 pricing adapter backed by direct eth_call RPC calls.
+
+    Supported pairs (direct pools, mainnet):
+      ETH/USDT  — WETH/USDT pool 0x0d4a11d5EEaaC28EC3F61d100daF4d40471f1852
+      ETH/USDC  — WETH/USDC pool 0xB4e16d0168e52d35CaCD2c6185b44281Ec28C9Dc
+
+    Other pairs fall back to stub pricing automatically.
+    """
+
+    _TOKENS: dict[str, _Token] = {
+        "ETH": _Token("ETH", 18),
+        "BTC": _Token("BTC", 8),
+        "USDT": _Token("USDT", 6),
+        "USDC": _Token("USDC", 6),
+        "BNB": _Token("BNB", 18),
+    }
+
+    # (token0_symbol, token1_symbol) → pool address
+    # token0 is always the lower address in Uniswap V2
+    _POOLS: dict[tuple[str, str], str] = {
+        # WETH(0xC02...) / USDT(0xdAC...) — WETH < USDT → WETH=token0
+        ("ETH", "USDT"): "0x0d4a11d5EEaaC28EC3F61d100daF4d40471f1852",
+        # USDC(0xA0b...) / WETH(0xC02...) — USDC < WETH → USDC=token0
+        ("ETH", "USDC"): "0xB4e16d0168e52d35CaCD2c6185b44281Ec28C9Dc",
+    }
+
+    def __init__(self, rpc_url: str) -> None:
+        self.rpc_url = rpc_url
+
+    def get_token(self, symbol: str) -> _Token:
+        if symbol not in self._TOKENS:
+            raise ValueError(f"Token {symbol} not supported in DEX mode")
+        return self._TOKENS[symbol]
+
+    def get_quote(
+        self, token_in: _Token, token_out: _Token, amount_in: int, gas_price: int = 1
+    ) -> _Quote:
+        base = "ETH" if token_in.symbol == "ETH" or token_out.symbol == "ETH" else None
+        quote_sym = token_out.symbol if token_in.symbol == "ETH" else token_in.symbol
+        pool_addr = self._POOLS.get(("ETH", quote_sym)) if base else None
+
+        if pool_addr is None:
+            raise ValueError(f"No Uniswap V2 pool for {token_in.symbol}/{token_out.symbol}")
+
+        r0, r1 = self._get_reserves(pool_addr)
+
+        # Pool token ordering depends on the pair
+        # ETH/USDT pool: token0=WETH(r0), token1=USDT(r1)
+        # ETH/USDC pool: token0=USDC(r0), token1=WETH(r1)
+        if quote_sym == "USDT":
+            # WETH=token0=r0, USDT=token1=r1
+            if token_in.symbol == "ETH":
+                reserve_in, reserve_out = r0, r1
+            else:
+                reserve_in, reserve_out = r1, r0
+        else:
+            # USDC=token0=r0, WETH=token1=r1
+            if token_in.symbol == "ETH":
+                reserve_in, reserve_out = r1, r0
+            else:
+                reserve_in, reserve_out = r0, r1
+
+        amount_out = (reserve_out * amount_in * 997) // (reserve_in * 1000 + amount_in * 997)
+        return _Quote(expected_output=amount_out)
+
+    def get_prices_for_pair(self, pair: str, size: float) -> tuple[float, float]:
+        """
+        Return (dex_buy, dex_sell) in quote-currency per base-currency.
+
+        dex_sell = effective price when selling `size` base on Uniswap
+        dex_buy  = effective cost  when buying  `size` base on Uniswap
+        Both in USDT (or quote token) per 1 base token.
+        """
+        base, quote = pair.split("/")
+        pool_addr = self._POOLS.get((base, quote))
+        if pool_addr is None:
+            raise ValueError(f"No Uniswap V2 pool for {pair}")
+
+        r0, r1 = self._get_reserves(pool_addr)
+        base_dec = self._TOKENS[base].decimals
+        quote_dec = self._TOKENS[quote].decimals
+
+        # WETH/USDT pool: token0=WETH(r0), token1=USDT(r1)
+        # USDC/WETH pool: token0=USDC(r0), token1=WETH(r1)  ← reversed!
+        if (base, quote) == ("ETH", "USDC"):
+            reserve_base, reserve_quote = r1, r0
+        else:
+            reserve_base, reserve_quote = r0, r1
+
+        size_raw = int(size * 10**base_dec)
+
+        # Sell base for quote (e.g. sell ETH → receive USDT)
+        out_raw = (reserve_quote * size_raw * 997) // (reserve_base * 1000 + size_raw * 997)
+        dex_sell = out_raw / (10**quote_dec * size)
+
+        # Buy base with quote (AMM getAmountIn: how much USDT to pay for size ETH)
+        num = reserve_quote * size_raw * 1000
+        den = (reserve_base - size_raw) * 997
+        if den <= 0:
+            dex_buy = dex_sell * 1.003
+        else:
+            in_raw = num // den + 1
+            dex_buy = in_raw / (10**quote_dec * size)
+
+        return dex_buy, dex_sell
+
+    def _get_reserves(self, pool_addr: str) -> tuple[int, int]:
+        payload = {
+            "jsonrpc": "2.0",
+            "method": "eth_call",
+            "params": [{"to": pool_addr, "data": "0x0902f1ac"}, "latest"],
+            "id": 1,
+        }
+        req = urllib.request.Request(
+            self.rpc_url,
+            data=json.dumps(payload).encode(),
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent": "PeanutTrade-Demo/1.0",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            result = json.loads(resp.read())
+        if "error" in result or not result.get("result"):
+            raise ValueError(f"RPC error: {result.get('error')}")
+        data = result["result"][2:]
+        return int(data[0:64], 16), int(data[64:128], 16)
+
+
+# ---------------------------------------------------------------------------
 # Session state — accumulates across ticks
 # ---------------------------------------------------------------------------
 
@@ -71,6 +227,7 @@ class SessionState:
     total_pnl: float = 0.0
     replay_blocks: int = 0
     cb_trips: int = 0
+    dex_mode: str = "Stub (mid×1.008)"
     log: list[str] = field(default_factory=list)
 
     def add_log(self, msg: str) -> None:
@@ -116,10 +273,12 @@ def _header(state: SessionState, pairs: list[str]) -> Panel:
     cb_status = (
         "[red]OPEN[/red]" if state.cb_trips > state.executions_done else "[green]CLOSED[/green]"
     )
+    dex_colour = "green" if "Uniswap" in state.dex_mode else "yellow"
     title = (
         f"[bold cyan]Week 4 — Arbitrage Pipeline Demo[/bold cyan]   "
         f"[dim]Tick {state.tick}  ·  {time.strftime('%H:%M:%S')}  ·  "
-        f"Pairs: {', '.join(pairs)}[/dim]"
+        f"Pairs: {', '.join(pairs)}[/dim]   "
+        f"DEX: [{dex_colour}]{state.dex_mode}[/{dex_colour}]"
     )
     stats = (
         f"Signals: [green]{state.signals_generated}[/green] generated  "
@@ -302,13 +461,14 @@ async def _run_tick(
     queue: SignalQueue,
     state: SessionState,
     score_threshold: float,
+    pricer: SimpleUniswapPricer | None = None,
 ) -> tuple[dict, list, list]:
     from unittest.mock import MagicMock
 
     state.tick += 1
     obs: dict[str, dict | None] = {}
 
-    # Fetch prices
+    # Fetch CEX prices
     for pair in pairs:
         symbol = BINANCE_SYMBOLS.get(pair, pair.replace("/", ""))
         obs[pair] = _fetch_ob(symbol)
@@ -325,22 +485,77 @@ async def _run_tick(
 
         exchange = MagicMock()
         exchange.fetch_order_book.return_value = ob
+
+        base, quote = pair.split("/")
+        use_real_dex = pricer is not None and (base, quote) in SimpleUniswapPricer._POOLS
+
+        if pricer is not None and not use_real_dex:
+            state.add_log(f"[dim]ℹ {pair} — no Uniswap pool, using stub DEX[/dim]")
+
         gen = SignalGenerator(
             exchange_client=exchange,
-            pricing_module=None,
+            pricing_module=None,  # real DEX prices injected below via patch
             inventory_tracker=tracker,
             fee_structure=fees,
             config={
-                "min_spread_bps": 50,
-                "min_profit_usd": 1.0,
+                "min_spread_bps": 1,
+                "min_profit_usd": 0.01,
                 "cooldown_seconds": 0,
                 "signal_ttl_seconds": 30,
+                "max_position_usd": 10_000_000,
             },
         )
-        sig = gen.generate(pair, size)
+
+        # Build real Uniswap prices dict and inject via _fetch_prices patch
+        real_prices = None
+        if use_real_dex:
+            try:
+                dex_buy, dex_sell = pricer.get_prices_for_pair(pair, size)
+                bid = float(ob["best_bid"][0])
+                ask = float(ob["best_ask"][0])
+                mid = (bid + ask) / 2
+                real_prices = {
+                    "cex_bid": bid,
+                    "cex_ask": ask,
+                    "dex_buy": dex_buy,
+                    "dex_sell": dex_sell,
+                    "bid_ask_spread_bps": (ask - bid) / mid * 10_000 if mid > 0 else 0.0,
+                }
+            except Exception as exc:
+                state.add_log(
+                    f"[yellow]⚠[/yellow] {pair} — Uniswap fetch failed ({exc}), using stub"
+                )
+                use_real_dex = False
+
+        try:
+            from unittest.mock import patch as _patch
+
+            if real_prices is not None:
+                with _patch.object(gen, "_fetch_prices", return_value=real_prices):
+                    sig = gen.generate(pair, size)
+            else:
+                sig = gen.generate(pair, size)
+        except Exception as exc:
+            state.add_log(f"[red]✗[/red] {pair} — generator error: {exc}")
+            sig = None
+
         if sig is None:
             state.signals_skipped += 1
-            state.add_log(f"[yellow]~[/yellow] {pair} — no signal (spread below threshold)")
+            if real_prices is not None:
+                # Log actual spreads so demo shows why no opportunity
+                dex_s = real_prices["dex_sell"]
+                dex_b = real_prices["dex_buy"]
+                cex_a = real_prices["cex_ask"]
+                cex_b = real_prices["cex_bid"]
+                sp_a = (dex_s - cex_a) / cex_a * 10_000 if cex_a > 0 else 0
+                sp_b = (cex_b - dex_b) / dex_b * 10_000 if dex_b > 0 else 0
+                state.add_log(
+                    f"[dim]~ {pair} DEX:real — no arb  "
+                    f"sell_spread={sp_a:+.2f}bps  buy_spread={sp_b:+.2f}bps  "
+                    f"(efficient market)[/dim]"
+                )
+            else:
+                state.add_log(f"[yellow]~[/yellow] {pair} — no signal (spread below threshold)")
             continue
 
         state.signals_generated += 1
@@ -361,9 +576,10 @@ async def _run_tick(
 
         queue.put(sig)
         scored.append((sig, breakdown))
+        dex_tag = "[green]DEX:real[/green]" if use_real_dex else "[yellow]DEX:stub[/yellow]"
         state.add_log(
-            f"[cyan]↑[/cyan] {pair} — score [bold]{sig.score:.1f}[/bold]  "
-            f"spread {float(sig.spread_bps):.1f}bps  net ${float(sig.expected_net_pnl):.2f}"
+            f"[cyan]↑[/cyan] {pair} {dex_tag} — score [bold]{sig.score:.1f}[/bold]  "
+            f"spread {float(sig.spread_bps):.1f}bps  net ${float(sig.expected_net_pnl):.4f}"
         )
 
     # Execute top signal from queue
@@ -408,7 +624,13 @@ async def _run_tick(
 # ---------------------------------------------------------------------------
 
 
-async def run_demo(pairs: list[str], size: float, ticks: int, interval: float) -> None:
+async def run_demo(
+    pairs: list[str],
+    size: float,
+    ticks: int,
+    interval: float,
+    rpc_url: str | None = None,
+) -> None:
     tracker = InventoryTracker([Venue.BINANCE, Venue.WALLET])
     assets = {"USDT": "500000"}
     for pair in pairs:
@@ -417,6 +639,10 @@ async def run_demo(pairs: list[str], size: float, ticks: int, interval: float) -
         Venue.BINANCE, {k: {"free": v, "locked": "0"} for k, v in assets.items()}
     )
     tracker.update_from_wallet(Venue.WALLET, assets)
+
+    pricer: SimpleUniswapPricer | None = None
+    if rpc_url:
+        pricer = SimpleUniswapPricer(rpc_url)
 
     scorer = SignalScorer()
     executor = Executor(
@@ -428,13 +654,16 @@ async def run_demo(pairs: list[str], size: float, ticks: int, interval: float) -
     executor.circuit_breaker = CircuitBreaker(CircuitBreakerConfig(failure_threshold=5))
     queue = SignalQueue(maxsize=50)
     state = SessionState()
+    state.dex_mode = f"Uniswap V2 ({rpc_url.split('/')[2]})" if rpc_url else "Stub (mid×1.008)"
 
-    # Initial empty state
     obs: dict = {p: None for p in pairs}
     scored: list = []
     results: list = []
 
-    state.add_log("[dim]Starting demo — fetching live Binance prices...[/dim]")
+    if rpc_url:
+        state.add_log(f"[green]DEX mode: real Uniswap V2 via {rpc_url.split('/')[2]}[/green]")
+    else:
+        state.add_log("[yellow]DEX mode: stub — pass --rpc-url for real Uniswap prices[/yellow]")
 
     with Live(
         _build_layout(state, pairs, obs, scored, results),
@@ -445,7 +674,15 @@ async def run_demo(pairs: list[str], size: float, ticks: int, interval: float) -
         tick_count = 0
         while ticks == 0 or tick_count < ticks:
             obs, scored, results = await _run_tick(
-                pairs, size, tracker, scorer, executor, queue, state, score_threshold=0.0
+                pairs,
+                size,
+                tracker,
+                scorer,
+                executor,
+                queue,
+                state,
+                score_threshold=0.0,
+                pricer=pricer,
             )
             live.update(_build_layout(state, pairs, obs, scored, results))
             tick_count += 1
@@ -494,14 +731,31 @@ async def run_demo(pairs: list[str], size: float, ticks: int, interval: float) -
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Week 4 live pipeline demo")
+    parser = argparse.ArgumentParser(
+        description="Week 4 live pipeline demo",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Examples:\n"
+            "  python demo_week4.py                                    # stub DEX\n"
+            "  python demo_week4.py --rpc-url https://eth.llamarpc.com # real Uniswap V2\n"
+            "  python demo_week4.py --pairs ETH/USDT --ticks 20\n"
+        ),
+    )
     parser.add_argument("--pairs", nargs="+", default=["ETH/USDT", "BTC/USDT"])
     parser.add_argument("--size", type=float, default=1.0)
     parser.add_argument("--ticks", type=int, default=10, help="0 = run until Ctrl+C")
     parser.add_argument("--interval", type=float, default=3.0, help="Seconds between ticks")
+    parser.add_argument(
+        "--rpc-url",
+        default=None,
+        help=(
+            "Ethereum RPC URL for real Uniswap V2 DEX prices. "
+            "Free options: https://eth.llamarpc.com  https://ethereum.publicnode.com"
+        ),
+    )
     args = parser.parse_args()
 
     try:
-        asyncio.run(run_demo(args.pairs, args.size, args.ticks, args.interval))
+        asyncio.run(run_demo(args.pairs, args.size, args.ticks, args.interval, args.rpc_url))
     except KeyboardInterrupt:
         console.print("\n[yellow]Stopped by user.[/yellow]")
