@@ -114,32 +114,42 @@ def _make_executor(use_flashbots: bool = False) -> Executor:
 
 
 def _make_bot(ob: dict):
-    """Instantiate ArbBot with a real-data (or test) order book."""
+    """Instantiate ArbBot with a real-data (or test) order book.
+
+    ExchangeClient is patched during construction so __init__ never calls
+    fetch_time (which hits testnet.binance.vision and fails in geo-restricted CI).
+    """
+    from unittest.mock import patch
+
     from scripts.arb_bot import ArbBot
 
-    bot = ArbBot(
-        {
-            "apiKey": "fake",  # pragma: allowlist secret
-            "secret": "fake",  # pragma: allowlist secret
-            "sandbox": True,
-            "simulation": True,
-            "pairs": ["ETH/USDT"],
-            "trade_size": 1.0,
-            "score_threshold": 0.0,
-            "signal_config": {
-                "min_spread_bps": 50,
-                "min_profit_usd": 1.0,
-                "cooldown_seconds": 0,
-            },
-        }
-    )
-    bot.exchange.fetch_order_book = MagicMock(return_value=ob)
-    bot.exchange.fetch_balance = MagicMock(
+    mock_exchange = MagicMock()
+    mock_exchange.fetch_order_book = MagicMock(return_value=ob)
+    mock_exchange.fetch_balance = MagicMock(
         return_value={
             "ETH": {"free": "100", "locked": "0"},
             "USDT": {"free": "500000", "locked": "0"},
         }
     )
+
+    with patch("scripts.arb_bot.ExchangeClient", return_value=mock_exchange):
+        bot = ArbBot(
+            {
+                "apiKey": "fake",  # pragma: allowlist secret
+                "secret": "fake",  # pragma: allowlist secret
+                "sandbox": True,
+                "simulation": True,
+                "pairs": ["ETH/USDT"],
+                "trade_size": 1.0,
+                "score_threshold": 0.0,
+                "signal_config": {
+                    "min_spread_bps": 50,
+                    "min_profit_usd": 1.0,
+                    "cooldown_seconds": 0,
+                },
+            }
+        )
+
     bot.inventory.update_from_cex(
         Venue.BINANCE,
         {
