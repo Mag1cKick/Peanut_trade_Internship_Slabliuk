@@ -21,4 +21,5 @@ pythonpath = ["."]
 
 markers = [
     "live: live integration tests requiring real API keys (Binance testnet)",
+    "network: integration tests requiring internet access (no API keys needed)",
 ]
