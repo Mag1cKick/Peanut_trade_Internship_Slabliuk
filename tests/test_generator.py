@@ -374,7 +374,7 @@ class TestEconomics:
         sig = gen.generate("ETH/USDT", 1.0)
         assert sig is not None
         expected_gross = (sig.spread_bps / 10_000) * (sig.size * sig.cex_price)
-        assert sig.expected_gross_pnl == pytest.approx(expected_gross, rel=1e-6)
+        assert float(sig.expected_gross_pnl) == pytest.approx(expected_gross, rel=1e-6)
 
 
 class TestSignalTtl:
