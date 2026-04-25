@@ -298,7 +298,7 @@ class TestPipelineMocked:
         scorer = SignalScorer()
         gen = _make_generator(self.OB)
 
-        async def fail_cex(*_):
+        async def fail_cex(*_a, **_kw):
             return {"success": False, "error": "rejected"}
 
         with patch.object(executor, "_execute_cex_leg", fail_cex):
@@ -361,7 +361,7 @@ class TestPipelineMocked:
         sig = _generate_scored(self.OB)
         executor = _make_executor(use_flashbots=False)
 
-        async def fail_dex(*_):
+        async def fail_dex(*_a, **_kw):
             return {"success": False, "error": "slippage"}
 
         with patch.object(executor, "_execute_dex_leg", fail_dex):
@@ -377,7 +377,7 @@ class TestPipelineMocked:
         sig = _generate_scored(self.OB)
         executor = _make_executor(use_flashbots=False)
 
-        async def fail_cex(*_):
+        async def fail_cex(*_a, **_kw):
             return {"success": False, "error": "rejected"}
 
         with patch.object(executor, "_execute_cex_leg", fail_cex):

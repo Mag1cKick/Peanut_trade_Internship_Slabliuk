@@ -444,3 +444,94 @@ class TestCalculatePnl:
         pnl = executor._calculate_pnl(ctx)
         gross = (2020.0 - 2000.0) * 1.0
         assert pnl < gross
+
+
+# ---------------------------------------------------------------------------
+# CEX retry logic
+# ---------------------------------------------------------------------------
+
+
+class TestCexRetry:
+    @pytest.mark.asyncio
+    async def test_retries_on_timeout_succeeds_second_attempt(self):
+        """Transient timeout triggers retry; success on 2nd attempt → DONE."""
+        executor = _make_executor(use_flashbots=False)
+        executor.config.leg1_timeout = 0.05
+        executor.config.leg1_max_retries = 2
+        executor.config.leg1_retry_base_delay = 0.01
+        call_count = 0
+
+        async def flaky_cex(*_a, **_kw):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                await asyncio.sleep(10)  # triggers timeout on first call
+            return {"success": True, "price": 2000.0, "filled": 1.0}
+
+        with patch.object(executor, "_execute_cex_leg", flaky_cex):
+            sig = _make_signal()
+            ctx = await executor.execute(sig)
+
+        assert ctx.state == ExecutorState.DONE
+        assert call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_no_retry_on_permanent_failure(self):
+        """Permanent error (insufficient balance) fails immediately without retry."""
+        executor = _make_executor(use_flashbots=False)
+        executor.config.leg1_max_retries = 3
+        call_count = 0
+
+        async def rejected(*_a, **_kw):
+            nonlocal call_count
+            call_count += 1
+            return {"success": False, "error": "insufficient balance"}
+
+        with patch.object(executor, "_execute_cex_leg", rejected):
+            sig = _make_signal()
+            ctx = await executor.execute(sig)
+
+        assert ctx.state == ExecutorState.FAILED
+        assert call_count == 1  # no retry
+
+    @pytest.mark.asyncio
+    async def test_exhausted_retries_returns_failed(self):
+        """All retries exhausted → FAILED."""
+        executor = _make_executor(use_flashbots=False)
+        executor.config.leg1_timeout = 0.05
+        executor.config.leg1_max_retries = 1
+        executor.config.leg1_retry_base_delay = 0.01
+
+        async def always_timeout(*_a, **_kw):
+            await asyncio.sleep(10)
+            return {"success": True, "price": 2000.0, "filled": 1.0}
+
+        with patch.object(executor, "_execute_cex_leg", always_timeout):
+            sig = _make_signal()
+            ctx = await executor.execute(sig)
+
+        assert ctx.state == ExecutorState.FAILED
+        assert "timeout" in ctx.error.lower()
+
+    @pytest.mark.asyncio
+    async def test_idempotency_key_reused_across_retries(self):
+        """The same order_id is passed on all retry attempts."""
+        executor = _make_executor(use_flashbots=False)
+        executor.config.leg1_timeout = 0.05
+        executor.config.leg1_max_retries = 1
+        executor.config.leg1_retry_base_delay = 0.01
+        received_ids: list[str | None] = []
+
+        async def record_id(*_a, order_id=None, **_kw):
+            received_ids.append(order_id)
+            if len(received_ids) == 1:
+                await asyncio.sleep(10)  # timeout first attempt
+            return {"success": True, "price": 2000.0, "filled": 1.0}
+
+        with patch.object(executor, "_execute_cex_leg", record_id):
+            sig = _make_signal()
+            await executor.execute(sig)
+
+        assert len(received_ids) == 2
+        assert received_ids[0] is not None
+        assert received_ids[0] == received_ids[1]  # same key reused

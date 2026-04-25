@@ -39,10 +39,17 @@ class CircuitBreakerConfig:
 
 class CircuitBreaker:
     """
-    Sliding-window circuit breaker with optional webhook alerts.
+    Sliding-window circuit breaker with half-open state (Fowler pattern).
+
+    States:
+      CLOSED   — normal operation, all requests allowed.
+      OPEN     — tripped, all requests blocked for cooldown_seconds.
+      HALF-OPEN — cooldown elapsed; one probe request allowed. If it succeeds
+                  the breaker fully resets. If it fails the breaker re-trips
+                  immediately, preventing a flood of failing requests from
+                  hammering a still-broken downstream service.
 
     Trips when ``failure_threshold`` failures occur within ``window_seconds``.
-    Stays open for ``cooldown_seconds``, then auto-resets.
     On trip, fires a non-blocking HTTP POST to ``config.webhook_url`` if set.
     """
 
@@ -50,8 +57,16 @@ class CircuitBreaker:
         self.config = config or CircuitBreakerConfig()
         self.failures: list[float] = []
         self.tripped_at: float | None = None
+        self._probe_allowed: bool = False  # True once cooldown elapses
 
     def record_failure(self) -> None:
+        if self._probe_allowed:
+            # Half-open probe failed → re-trip immediately
+            self._probe_allowed = False
+            log.critical("CIRCUIT BREAKER RE-TRIPPED (half-open probe failed)")
+            self.tripped_at = time.time()
+            return
+
         now = time.time()
         self.failures.append(now)
         cutoff = now - self.config.window_seconds
@@ -61,10 +76,16 @@ class CircuitBreaker:
             self.trip()
 
     def record_success(self) -> None:
-        pass
+        if self._probe_allowed:
+            # Half-open probe succeeded → fully reset
+            self._probe_allowed = False
+            self.tripped_at = None
+            self.failures = []
+            log.info("Circuit breaker reset (half-open probe succeeded)")
 
     def trip(self) -> None:
         self.tripped_at = time.time()
+        self._probe_allowed = False
         log.critical("CIRCUIT BREAKER TRIPPED")
         try:
             from monitoring.metrics import CIRCUIT_BREAKER_TRIPS
@@ -84,8 +105,14 @@ class CircuitBreaker:
         if self.tripped_at is None:
             return False
         if time.time() - self.tripped_at > self.config.cooldown_seconds:
+            # Cooldown elapsed — clear trip state and enter half-open.
+            # tripped_at/failures are reset here so existing checks still work,
+            # but _probe_allowed marks that the NEXT execution is a probe.
             self.tripped_at = None
             self.failures = []
+            if not self._probe_allowed:
+                self._probe_allowed = True
+                log.info("Circuit breaker half-open — allowing probe request")
             return False
         return True
 

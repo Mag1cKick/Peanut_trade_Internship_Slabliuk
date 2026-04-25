@@ -93,6 +93,19 @@ EXECUTION_LATENCY = Histogram(
     buckets=[0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0],
 )
 
+EXECUTION_SLIPPAGE = Histogram(
+    "arb_execution_slippage_bps",
+    "Fill price deviation from signal arrival price in basis points",
+    ["pair", "leg"],
+    buckets=[0, 1, 2, 5, 10, 20, 50, 100, 200],
+)
+
+CEX_RETRY_COUNT = Counter(
+    "arb_cex_retry_total",
+    "Number of CEX order retries (transient failures)",
+    ["pair"],
+)
+
 
 def start_metrics_server(port: int = 8000) -> None:
     """Start the Prometheus HTTP /metrics server on the given port."""
