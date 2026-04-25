@@ -1,45 +1,62 @@
-# Peanut Trade — Weeks 1–4: Core, Chain, Pricing, Exchange & Live Trading Modules
+# Peanut Trade — Weeks 1–4: CEX-DEX Arbitrage Bot
 
-> Arbitrage trading system — wallet management, blockchain interaction,
-> transaction building, on-chain DEX pricing, CEX order book analysis,
-> multi-venue inventory tracking, real-time WebSocket order book streaming,
-> PnL tracking, live dashboard, and end-to-end arb opportunity detection.
+> End-to-end arbitrage trading system — wallet management, blockchain interaction,
+> on-chain DEX pricing, CEX order book analysis, multi-venue inventory tracking,
+> signal generation & scoring, executor state machine, circuit breaker,
+> and a live two-mode trading bot (Binance testnet + Uniswap V2 mainnet).
 
 ---
 
 ## Quick Start
 
 ```bash
-# 1. Clone
+# 1. Clone & install
 git clone <your-repo-url>
 cd Peanut_trade_Internship_Slabliuk
-
-# 2. Install dependencies
 make install
 
-# 3. Configure secrets
+# 2. Configure
 cp .env.example .env
-# Edit .env — add PRIVATE_KEY, RPC_URL, BINANCE_API_KEY, BINANCE_API_SECRET
+# Edit .env — PRIVATE_KEY, ETH_RPC_URL, BINANCE_TESTNET_API_KEY, BINANCE_TESTNET_SECRET
 
-# 4. Run all 1522 tests
+# 3. Run all 1773 tests
 make test
 
-# 5. Full pipeline demo (offline, no API keys needed)
-python scripts/lab4_demo.py
+# ── Week 4 ─────────────────────────────────────────────────────────────────
 
-# 6. CEX order book live snapshot (Binance testnet)
+# 4. Live arb demo — stub DEX (no API keys, always works)
+python scripts/demo_week4.py
+
+# 5. Live arb demo — real Uniswap V2 prices (needs ETH_RPC_URL)
+python scripts/demo_week4.py --rpc-url https://ethereum.publicnode.com
+
+# 6. Run the bot in TEST mode (Binance testnet + real DEX prices, no execution)
+python scripts/arb_bot.py --mode test
+
+# 7. Run the bot in PROD mode (Binance mainnet + real execution, needs PRIVATE_KEY)
+python scripts/arb_bot.py --mode prod
+
+# 8. Week 4 integration tests — mocked (CI-safe, no network)
+pytest tests/test_integration_week4.py -m "not network" -v
+
+# 9. Week 4 integration tests — real Binance prices (needs internet)
+pytest tests/test_integration_week4.py -m network -v -s
+
+# ── Earlier weeks ──────────────────────────────────────────────────────────
+
+# 10. CEX order book live snapshot
 python -m exchange.orderbook ETH/USDT --depth 20 --qty 2
 
-# 7. Arb opportunity check (mocked DEX price + live CEX)
+# 11. Arb opportunity check (mocked DEX + live CEX)
 python -m integration.arb_checker ETH/USDT --size 2.0 --dex-price 2007.21
 
-# 8. Live WebSocket order book stream (Binance testnet)
+# 12. Live WebSocket order book stream
 python -m exchange.ws_orderbook ETH/USDT --count 5
 
-# 9. Venue rebalance check
+# 13. Venue rebalance check
 python -m inventory.rebalancer --check
 
-# 10. P&L dashboard (demo data)
+# 14. P&L dashboard (demo data)
 python -m inventory.dashboard --once
 ```
 
@@ -1012,10 +1029,163 @@ Runs entirely offline (no API keys needed) — mocks CEX and WebSocket calls:
 
 ---
 
+## Week 4: Strategy & Execution (Arbitrage Bot)
+
+### Architecture
+
+```
+Live prices (Binance REST/WS)
+        │
+        ▼
+┌───────────────────┐     ┌──────────────────┐
+│  SignalGenerator  │────▶│  SignalScorer     │
+│  strategy/        │     │  strategy/        │
+│  _fetch_prices()  │     │  spread · liq     │
+│  spread calc      │     │  inventory · hist │
+└───────────────────┘     └────────┬─────────┘
+                                   │ score 0-100
+                                   ▼
+                          ┌──────────────────┐
+                          │   SignalQueue     │  max-heap, thread-safe
+                          │   executor/       │  evicts lowest score
+                          └────────┬─────────┘
+                                   │ highest score first
+                                   ▼
+                          ┌──────────────────────────────────────┐
+                          │           Executor                    │
+                          │  IDLE → VALIDATING → LEG1_PENDING    │
+                          │       → LEG1_FILLED → LEG2_PENDING   │
+                          │       → DONE / FAILED / UNWINDING    │
+                          │                                       │
+                          │  CEX-first  OR  DEX-first (Flashbots)│
+                          │  retry + backoff + idempotency key    │
+                          │  ERC-20 approve → swap → receipt      │
+                          └────────┬──────────────────────────────┘
+                                   │
+                   ┌───────────────┼────────────────┐
+                   ▼               ▼                ▼
+          CircuitBreaker    ReplayProtection    PnLEngine
+          sliding window    TTL-keyed dict      ArbRecord
+          half-open probe   60s expiry          summary()
+          webhook alert
+```
+
+### Signal → Score → Execute flow
+
+| Stage | Code | What happens |
+|---|---|---|
+| Price fetch | `generator._fetch_prices()` | CEX order book (Binance) + DEX reserves (Uniswap V2 via `UniswapDirectPricer`) |
+| Signal | `generator.generate()` | Spread calc, fee check, inventory pre-flight; emits `Signal` with `Decimal` economics |
+| Score | `scorer.score()` | 4-factor 0–100: spread (40%), liquidity bid-ask (20%), inventory (20%), win-rate history (20%) |
+| Queue | `SignalQueue.put()` | Max-heap by score; evicts lowest when full; skips expired on dequeue |
+| Execute | `executor.execute()` | State machine; retry with 50ms→100ms→200ms backoff; idempotency key; slippage tracking |
+| Unwind | `executor._unwind()` | CEX market order or DEX reverse swap if leg 2 fails after leg 1 filled |
+| Safety | `CircuitBreaker` | Trips after N failures in window; half-open probe after cooldown; webhook alert |
+| Record | `pnl_engine.record()` | `execution_to_arb_record()` bridges `ExecutionContext` → `ArbRecord` |
+
+### Operating Modes
+
+#### TEST (default) — safe development
+
+```bash
+python scripts/arb_bot.py --mode test
+```
+
+- Binance **testnet** (`sandbox=True`) — real order book data, no real orders
+- `UniswapDirectPricer` queries live **mainnet** Uniswap V2 pool reserves for accurate DEX prices
+- `simulation_mode=True` — execution always returns a mock fill, no real transactions
+- No `PRIVATE_KEY` required
+
+#### PROD — real execution
+
+```bash
+# Prerequisites
+export PRIVATE_KEY=0x...
+export BINANCE_API_KEY=...
+export BINANCE_SECRET=...
+export ETH_RPC_URL=https://eth-mainnet.g.alchemy.com/v2/YOUR_KEY
+# Optional: local Anvil fork for execution quote validation
+anvil --fork-url $ETH_RPC_URL &
+export FORK_URL=http://127.0.0.1:8545
+
+python scripts/arb_bot.py --mode prod
+```
+
+- Binance **mainnet** — real orders placed
+- Real DEX execution via Uniswap V2 (`swapExactETHForTokens` / `swapExactTokensForETH`)
+- ERC-20 token approval sent automatically on first trade per token
+- `PRIVATE_KEY` required; wallet loaded via `WalletManager.from_env()`
+
+### Demo
+
+```bash
+# Stub DEX prices (always works, no keys needed)
+python scripts/demo_week4.py
+python scripts/demo_week4.py --ticks 15 --interval 2
+python scripts/demo_week4.py --ticks 0                   # until Ctrl+C
+
+# Real Uniswap V2 DEX prices (needs ETH_RPC_URL)
+python scripts/demo_week4.py --rpc-url https://ethereum.publicnode.com
+python scripts/demo_week4.py --rpc-url https://ethereum.publicnode.com --pairs ETH/USDT --ticks 10
+```
+
+Live terminal shows: bid/ask prices, signal score breakdown (spread · liquidity · inventory · history), priority queue ordering, execution fills, latency, running PnL, circuit breaker status.
+
+### Key components
+
+```
+strategy/
+  signal.py       — Signal dataclass; is_valid(); bid_ask_spread_bps for liquidity scoring
+  fees.py         — FeeStructure; all Decimal arithmetic; breakeven_spread_bps()
+  generator.py    — SignalGenerator; _fetch_prices → spread calc → inventory check
+  scorer.py       — SignalScorer; 4-factor weighted score; apply_decay(); record_result()
+
+executor/
+  engine.py       — Executor state machine; CEX retry+backoff; DEX swap routing;
+                    ERC-20 approve; slippage tracking; _unwind_dex_leg_sync()
+  recovery.py     — CircuitBreaker (sliding window + half-open); ReplayProtection (TTL)
+  queue.py        — SignalQueue (thread-safe max-heap; evict-lowest on full)
+
+pricing/
+  uniswap_direct.py — UniswapDirectPricer; getReserves via eth_call; AMM formula;
+                      get_token() / get_quote() interface for SignalGenerator
+
+monitoring/
+  metrics.py      — Prometheus counters/histograms: signals, PnL, slippage, retries,
+                    circuit breaker, inventory balances, execution latency
+
+scripts/
+  arb_bot.py      — ArbBot; MODE_TEST / MODE_PROD; concurrent price fetch (asyncio.gather);
+                    apply_decay in drain loop; INVENTORY_BALANCE gauge; wallet balance sync
+  demo_week4.py   — Rich live terminal demo; stub or real Uniswap DEX prices
+```
+
+### Prometheus metrics
+
+| Metric | Type | What it measures |
+|---|---|---|
+| `arb_signals_generated_total` | Counter | Signals produced per pair |
+| `arb_signals_skipped_total` | Counter | Skipped (low score / decayed) |
+| `arb_trades_executed_total` | Counter | Executions by outcome (done/failed) |
+| `arb_execution_slippage_bps` | Histogram | Actual vs expected fill price per leg |
+| `arb_execution_latency_seconds` | Histogram | Wall-clock time per execution |
+| `arb_pnl_usd` | Histogram | Net PnL distribution per trade |
+| `arb_signal_score` | Histogram | Score distribution at execution |
+| `arb_circuit_breaker_open` | Gauge | 1 if open, 0 if closed |
+| `arb_circuit_breaker_trips_total` | Counter | Total trips |
+| `arb_replay_blocks_total` | Counter | Duplicate signals blocked |
+| `arb_unwinds_total` | Counter | Unwind operations triggered |
+| `arb_inventory_balance` | Gauge | Balance per venue per asset |
+| `arb_cex_retry_total` | Counter | CEX order retries (transient failures) |
+
+Start scraping: `python scripts/arb_bot.py --mode test` with `metrics_port: 8000` in config, then `curl http://localhost:8000/metrics`.
+
+---
+
 ## Running Tests
 
 ```bash
-make test                                            # run all 1522 tests (99% coverage)
+make test                                            # run all 1773 tests (97% coverage)
 
 # Week 1 — core, chain
 python -m pytest tests/test_wallet.py tests/test_types.py tests/test_serializer.py -v
@@ -1032,6 +1202,13 @@ python -m pytest tests/test_multi_venue_tracker.py  # inventory tracking
 python -m pytest tests/test_rebalancer.py -v        # rebalance planner
 python -m pytest tests/test_pnl.py -v               # P&L engine
 python -m pytest tests/test_arb_checker.py -v       # integration pipeline
+
+# Week 4 — strategy & execution
+pytest tests/test_signal.py tests/test_fees.py tests/test_generator.py -v
+pytest tests/test_scorer.py tests/test_executor.py tests/test_recovery.py -v
+pytest tests/test_stretch_goals.py -v               # queue + metrics + webhook
+pytest tests/test_integration_week4.py -m "not network" -v  # full pipeline (mocked)
+pytest tests/test_integration_week4.py -m network -v -s     # real Binance prices
 
 # Week 4 — live trading infrastructure (stretch)
 python -m pytest tests/test_bybit_client.py -v      # BybitClient (52 tests)
@@ -1077,7 +1254,7 @@ PRIVATE_KEY=0x... python scripts/integration_test.py --dry-run
 | Command | What it does |
 |---|---|
 | `make install` | Install all dependencies |
-| `make test` | Run all 1522 tests (99% coverage) |
+| `make test` | Run all 1773 tests (97% coverage) |
 | `make lint` | Lint with ruff |
 | `make format` | Auto-format with ruff |
 | `make pre-commit-install` | Wire up git hooks |
