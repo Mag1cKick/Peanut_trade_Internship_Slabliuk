@@ -182,6 +182,67 @@ class TestCircuitBreakerMisc:
 
 
 # ---------------------------------------------------------------------------
+# Half-open state (Fowler pattern)
+# ---------------------------------------------------------------------------
+
+
+class TestCircuitBreakerHalfOpen:
+    def test_half_open_probe_success_fully_resets(self):
+        """After cooldown, one successful execution fully resets the breaker."""
+        cb = CircuitBreaker(CircuitBreakerConfig(failure_threshold=1, cooldown_seconds=0.05))
+        cb.record_failure()
+        time.sleep(0.07)
+        assert not cb.is_open()  # cooldown elapsed — probe allowed
+        cb.record_success()  # probe succeeded
+        assert not cb.is_open()
+        assert cb.tripped_at is None
+        assert cb.failures == []
+        assert not cb._probe_allowed
+
+    def test_half_open_probe_failure_retrips_immediately(self):
+        """After cooldown, one failure re-trips without needing window accumulation."""
+        cb = CircuitBreaker(CircuitBreakerConfig(failure_threshold=3, cooldown_seconds=0.05))
+        cb.record_failure()
+        cb.record_failure()
+        cb.record_failure()  # trips
+        time.sleep(0.07)
+        assert not cb.is_open()  # half-open
+        cb.record_failure()  # probe fails → immediate re-trip
+        assert cb.is_open()
+
+    def test_half_open_does_not_retrigger_on_success_when_closed(self):
+        """record_success() on a closed (never tripped) breaker does nothing."""
+        cb = CircuitBreaker(CircuitBreakerConfig(failure_threshold=3))
+        cb.record_failure()
+        cb.record_success()  # not in half-open — no-op
+        cb.record_failure()
+        assert not cb.is_open()  # still needs one more failure to trip
+
+    def test_probe_flag_set_only_once(self):
+        """_probe_allowed is set on first is_open() call after cooldown, not repeatedly."""
+        cb = CircuitBreaker(CircuitBreakerConfig(failure_threshold=1, cooldown_seconds=0.05))
+        cb.record_failure()
+        time.sleep(0.07)
+        cb.is_open()  # sets _probe_allowed
+        cb.is_open()  # second call — already set
+        assert cb._probe_allowed  # still pending until probe runs
+
+    def test_full_cycle_trip_probe_fail_retrap_probe_succeed_reset(self):
+        """Full trip → half-open → re-trip → half-open → reset cycle."""
+        cb = CircuitBreaker(CircuitBreakerConfig(failure_threshold=1, cooldown_seconds=0.05))
+        cb.record_failure()  # trip
+        time.sleep(0.07)
+        assert not cb.is_open()  # half-open
+        cb.record_failure()  # probe fails → re-trip
+        assert cb.is_open()
+        time.sleep(0.07)
+        assert not cb.is_open()  # half-open again
+        cb.record_success()  # probe succeeds → fully reset
+        assert not cb.is_open()
+        assert not cb._probe_allowed
+
+
+# ---------------------------------------------------------------------------
 # ReplayProtection — required tests
 # ---------------------------------------------------------------------------
 
