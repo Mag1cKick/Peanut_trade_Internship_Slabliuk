@@ -1182,6 +1182,107 @@ Start scraping: `python scripts/arb_bot.py --mode test` with `metrics_port: 8000
 
 ---
 
+## Strategy Review
+
+### How the bot makes money
+
+The bot profits from **CEX-DEX price divergence** — temporary gaps between the Binance price and the price implied by Uniswap V2 pool reserves.
+
+**When the gap opens:**
+- A large market order hits Binance, moving the CEX price before the DEX reacts
+- High-volatility bursts where Uniswap AMM reserves lag behind CEX price discovery
+- Immediately after a major news event hits CEX orderbooks
+
+**The trade:**
+1. Detect: `(dex_sell_price - cex_ask) / cex_ask × 10_000 > breakeven_spread_bps`
+2. Buy cheap on the venue where price is lower
+3. Sell immediately on the venue where price is higher
+4. Net profit = gross_spread − CEX_fee (10 bps) − DEX_fee (30 bps) − gas
+
+**Where the edge is:**
+
+| Edge | Mechanism |
+|---|---|
+| Speed | Concurrent price fetch via `asyncio.gather`; 500ms CEX timeout not 5s |
+| Priority | Max-heap queue executes highest-value signal first within each tick |
+| Fee precision | All fee arithmetic in `Decimal`; only signals above breakeven execute |
+| Flashbots | DEX-first mode submits via private mempool — front-running blocked |
+| Score filter | Low-quality signals (stale history, thin book) rejected before execution |
+| Retry safety | Idempotency key prevents double-fill on network retry |
+
+**Realistic edge:** Most CEX-DEX arb is competed away within 100ms by co-located HFT bots. The realistic opportunity set for this bot is: less liquid pairs, periods of very high volatility, and Flashbots MEV-Share backrun rebates.
+
+---
+
+## Improvements from Reading Material
+
+### Barry Johnson — Algorithmic Trading & DMA
+
+**CEX timeout 500ms (was 5s)**
+Binance REST confirms in ~50ms. A 5s timeout wasted the entire arb window. 500ms is already generous.
+
+**IOC orders**
+`create_limit_ioc_order` — fill at ≤ this price or cancel immediately. A resting limit order could fill seconds later at a stale price, turning a profitable signal into a loss.
+
+**Execution slippage tracking**
+`EXECUTION_SLIPPAGE` histogram records `|actual_fill − signal_price| / signal_price × 10_000` bps per leg. This is the key TCA metric — it reveals whether the price model is accurate over many trades.
+
+**Gas price on DEX transactions**
+`with_gas_price("high").with_gas_estimate(buffer=1.2)` — EIP-1559 priority fee ensures next-block inclusion. An arb tx that doesn't land in the next block is worthless; the opportunity is gone. Unwind uses `buffer=1.3` — it's more urgent and some token contracts have extra transfer hooks that underestimate gas.
+
+### Lehalle — Market Microstructure in Practice
+
+**Bid-ask spread as liquidity proxy**
+`signal.bid_ask_spread_bps` is fetched from the live order book and feeds `_score_liquidity()`. Tight spread (0.04 bps on ETH/USDT) = score 100; wide spread (>5 bps) = score 0. The standard microstructure liquidity proxy — wide spreads mean thin markets with higher price impact.
+
+**Adverse selection awareness**
+`_score_inventory()` penalises signals that increase venue imbalance. Informed flow (arb bots) hurts market makers who widen their spreads in response — the bot avoids compounding its own market impact.
+
+### Microsoft Retry Pattern
+
+**Failure classification**
+`_PERMANENT_CEX_ERRORS = frozenset({"insufficient", "balance", "rejected", ...})` — permanent errors abort immediately, no retry. The pattern: retrying a permanent failure wastes time and risks duplicate orders.
+
+**Exponential backoff + jitter**
+Delays: 50ms → 100ms → 200ms ±20% random jitter. Jitter prevents thundering herd — without it, all retrying instances hit the exchange at the exact same moment after a brief outage.
+
+**Idempotency key**
+`clientOrderId = f"{signal_id}_{uuid[:8]}"` reused across all retry attempts. If the first attempt succeeded but the confirmation timed out, the retry sees "order already exists" and returns the original fill — not a second order at double position size.
+
+### Martin Fowler — Circuit Breaker Pattern
+
+**Half-open state**
+After cooldown, `_probe_allowed=True` — one probe request allowed. Success → full reset. Failure → immediate re-trip. The two-state version (direct open→closed) can repeatedly trip and reset if the underlying issue persists, flooding a broken service with requests.
+
+**Webhook alert**
+`_send_webhook_async()` fires a daemon-thread HTTP POST to Slack/PagerDuty on trip. Non-blocking — never delays the trading loop.
+
+### Python AsyncIO
+
+**Concurrent price fetching**
+`asyncio.gather(*[_generate_one(pair) for pair in pairs])` — 4 pairs × 50ms each = 200ms sequential vs ~50ms parallel. Given arb windows close in 100-200ms, this halves the observation latency.
+
+**`run_in_executor` for sync DEX calls**
+The blocking web3 call runs in a thread pool without blocking the event loop. The loop stays responsive (circuit breaker checks, logging) while waiting for the DEX receipt.
+
+### Flashbots Protect / MEV
+
+**DEX-first mode**
+Private mempool submission: if the swap would revert (stale price, slippage exceeded), the transaction is **dropped with zero gas cost**. Public mempool reverts cost $2-5 in wasted gas per failed attempt.
+
+**`tx_deadline_seconds=120`**
+Maps to Flashbots `maxBlockNumber` — if not included within N blocks, the transaction expires silently rather than sitting pending indefinitely and potentially executing at a stale price.
+
+### Davey — Building Trading Systems
+
+**Configurable score threshold**
+`score_threshold=60` (test) vs `score_threshold=70` (prod). Higher threshold in prod means fewer trades but stronger signals — Davey's principle: don't over-optimise on the same data you'll trade on.
+
+**Unwind strategy — immediate exit, wider slippage**
+`unwind_slippage_bps=150` vs normal `slippage_bps=50`. Holding an unhedged position costs price risk every millisecond. Paying extra slippage to exit immediately is almost always cheaper than the risk of waiting for a better fill.
+
+---
+
 ## Running Tests
 
 ```bash
