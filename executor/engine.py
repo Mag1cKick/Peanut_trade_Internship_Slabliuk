@@ -453,11 +453,16 @@ class Executor:
             tx_value = TokenAmount(raw=0, decimals=18, symbol="ETH")
 
         try:
+            # with_gas_price("high") sets EIP-1559 maxFeePerGas/maxPriorityFeePerGas
+            # from ChainClient.get_gas_price() — arb txs must land in the next block.
+            # with_gas_estimate() adds a 1.2× safety buffer on the gas limit.
             tx = (
                 TransactionBuilder(chain_client, wallet)
                 .to(router)
                 .value(tx_value)
                 .data(calldata)
+                .with_gas_estimate(buffer=1.2)
+                .with_gas_price("high")
                 .build()
             )
             signed = wallet.sign_transaction(tx.to_dict())
@@ -618,11 +623,14 @@ class Executor:
             )
             tx_value = TokenAmount(raw=0, decimals=18, symbol="ETH")
 
+        # Unwind is time-critical — use "high" gas to ensure next-block inclusion.
         tx = (
             TransactionBuilder(chain_client, wallet)
             .to(router)
             .value(tx_value)
             .data(calldata)
+            .with_gas_estimate(buffer=1.3)
+            .with_gas_price("high")
             .build()
         )
         signed = wallet.sign_transaction(tx.to_dict())
