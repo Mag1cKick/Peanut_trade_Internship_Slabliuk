@@ -40,3 +40,6 @@ Thumbs.db
 .vscode/
 *.swp
 .claude
+
+# Bot log files
+logs/
