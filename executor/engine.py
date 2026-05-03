@@ -338,6 +338,22 @@ class Executor:
                 "price": signal.cex_price * 1.0001,
                 "filled": actual_size,
             }
+
+        # Apply Binance trading rules: round qty/price and validate filters
+        # before submitting — Binance rejects orders that violate LOT_SIZE,
+        # PRICE_FILTER, or MIN_NOTIONAL without this pre-processing.
+        try:
+            from config.settings import get_trading_rules
+
+            rules = get_trading_rules(signal.pair, self.exchange)
+            price_for_order = rules.round_price(signal.cex_price * 1.001)
+            actual_size = rules.round_quantity(actual_size)
+            ok, reason = rules.validate(actual_size, price_for_order)
+            if not ok:
+                return {"success": False, "error": f"Trading rules: {reason}"}
+        except ImportError:
+            price_for_order = signal.cex_price * 1.001
+
         side = "buy" if signal.direction == Direction.BUY_CEX_SELL_DEX else "sell"
         # clientOrderId provides idempotency: if this request is retried after a
         # timeout, the exchange recognises the duplicate and returns the original
@@ -347,7 +363,7 @@ class Executor:
             symbol=signal.pair,
             side=side,
             amount=actual_size,
-            price=signal.cex_price * 1.001,
+            price=price_for_order,
             params=params,
         )
         return {

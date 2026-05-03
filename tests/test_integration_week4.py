@@ -147,6 +147,14 @@ def _make_bot(ob: dict):
                     "min_profit_usd": 1.0,
                     "cooldown_seconds": 0,
                 },
+                # Raise limits high enough for test trade sizes (~$2000 at 1 ETH)
+                "initial_capital": 100_000.0,
+                "risk_limits": {
+                    "max_trade_usd": 10_000.0,
+                    "max_daily_loss": 50_000.0,
+                    "max_position_per_token": 1000.0,
+                },
+                "dry_run": False,  # tests that assert on execution must disable dry-run
             }
         )
 
