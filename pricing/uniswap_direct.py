@@ -105,6 +105,8 @@ ARBITRUM = NetworkConfig(
         "WBTC": DirectToken("WBTC", 8, "0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f"),
         "DAI": DirectToken("DAI", 18, "0xDA10009cBd5D07dd0CeCc66161FC93D7c9000da1"),
         "ARB": DirectToken("ARB", 18, "0x912CE59144191C1204E64559FE8253a0e49E6548"),
+        "MAGIC": DirectToken("MAGIC", 18, "0x539bdE0d7Dbd336b79148AA742883198BBF60342"),
+        "PENDLE": DirectToken("PENDLE", 18, "0x0c880f6761F1af8d9Aa9C466984b80DAb9a8c9e8"),
     },
     # Pools are discovered via factory.getPair() at runtime — no hardcoding needed.
     pools={},
@@ -326,3 +328,200 @@ class UniswapDirectPricer:
         if "error" in result or not result.get("result"):
             raise ValueError(f"eth_call to {to} failed: {result.get('error', 'empty result')}")
         return result["result"][2:]  # strip 0x
+
+
+# ---------------------------------------------------------------------------
+# Uniswap V3 network config + pricer
+# ---------------------------------------------------------------------------
+
+# Uniswap V3 on Arbitrum One — same factory on all chains Uniswap V3 deployed to
+ARBITRUM_V3 = NetworkConfig(
+    name="arbitrum-v3",
+    chain_id=42161,
+    router="0xE592427A0AEce92De3Edee1F18E0157C05861564",  # V3 SwapRouter
+    factory="0x1F98431c8aD98523631AE4a59f267346ea31F984",  # V3 Factory (universal)
+    tokens=ARBITRUM.tokens,  # same token addresses as V2
+    pools={},
+)
+
+
+class UniswapV3Pricer:
+    """
+    Drop-in replacement for UniswapDirectPricer using Uniswap V3 pools.
+
+    Instead of getReserves() + AMM formula, reads sqrtPriceX96 from slot0()
+    for an instant spot price with no reserve calculation.
+
+    Tries fee tiers 500 → 3000 → 10000 in order and uses the first pool found.
+    ARB/USDC, GMX/USDC, and other Arbitrum-native pairs live on V3, not V2.
+
+    Usage:
+        pricer = UniswapV3Pricer(rpc_url, network=ARBITRUM_V3)
+        generator = SignalGenerator(..., pricing_module=pricer, ...)
+    """
+
+    # Fee tiers to probe, lowest first (most liquid for major pairs)
+    _FEE_TIERS = (500, 3000, 10000)
+
+    def __init__(self, rpc_url: str, network: NetworkConfig | None = None) -> None:
+        self.rpc_url = rpc_url
+        self.network = network or ARBITRUM_V3
+        self._pool_cache: dict[tuple[str, str], str] = {}
+        self._token0_cache: dict[str, str] = {}
+
+    @property
+    def router(self) -> str:
+        return self.network.router
+
+    # ------------------------------------------------------------------
+    # SignalGenerator interface (same as V2 pricer)
+    # ------------------------------------------------------------------
+
+    def get_token(self, symbol: str) -> DirectToken:
+        if symbol not in self.network.tokens:
+            raise ValueError(f"UniswapV3Pricer: unknown token '{symbol}'")
+        return self.network.tokens[symbol]
+
+    def get_quote(self, token_in, token_out, amount_in, gas_price=1) -> DirectQuote:
+        prices = self.get_prices_for_pair(
+            f"{token_in.symbol}/{token_out.symbol}", amount_in / 10**token_in.decimals
+        )
+        if prices is None:
+            return DirectQuote(expected_output=0)
+        _, dex_sell = prices
+        out = int(dex_sell * amount_in / 10**token_in.decimals * 10**token_out.decimals)
+        return DirectQuote(expected_output=out)
+
+    def get_prices_for_pair(self, pair: str, size: float = 1.0) -> tuple[float, float] | None:
+        """
+        Return (dex_buy, dex_sell) spot prices from the V3 pool's sqrtPriceX96.
+        Fee is added/subtracted from the mid price to approximate fill prices.
+        Returns None if no pool found for this pair.
+        """
+        base, quote = pair.split("/")
+        pool, fee_tier = self._resolve_pool(base, quote)
+        if pool is None:
+            return None
+
+        price = self._price_from_slot0(pool, base, quote)
+        if price is None or price <= 0:
+            return None
+
+        fee = fee_tier / 1_000_000  # 500 → 0.0005
+        return price * (1 + fee), price * (1 - fee)
+
+    # ------------------------------------------------------------------
+    # Pool discovery
+    # ------------------------------------------------------------------
+
+    def _resolve_pool(self, base: str, quote: str) -> tuple[str | None, int]:
+        """Return (pool_address, fee_tier) trying tiers in order, or (None, 0)."""
+        key = (base, quote)
+        if key in self._pool_cache:
+            addr = self._pool_cache[key]
+            # fee tier stored alongside — encode in cache value as addr:fee
+            parts = addr.split(":")
+            return parts[0], int(parts[1])
+
+        if base not in self.network.tokens or quote not in self.network.tokens:
+            return None, 0
+
+        token_a = self.network.tokens[base].address
+        token_b = self.network.tokens[quote].address
+
+        for fee in self._FEE_TIERS:
+            addr = self._get_pool_from_factory(token_a, token_b, fee)
+            if addr and addr != "0x" + "0" * 40:
+                self._pool_cache[key] = f"{addr}:{fee}"
+                self._pool_cache[(quote, base)] = f"{addr}:{fee}"
+                return addr, fee
+
+        return None, 0
+
+    def _get_pool_from_factory(self, token_a: str, token_b: str, fee: int) -> str | None:
+        """
+        Call V3 factory.getPool(tokenA, tokenB, fee) → pool address.
+        Selector: keccak256("getPool(address,address,uint24)")[:4] = 0x1698ee82
+        """
+
+        def _pad_addr(a: str) -> str:
+            return a.lower().replace("0x", "").zfill(64)
+
+        fee_hex = hex(fee)[2:].zfill(64)
+        data = "0x1698ee82" + _pad_addr(token_a) + _pad_addr(token_b) + fee_hex
+        try:
+            result = self._eth_call(self.network.factory, data)
+            return "0x" + result[-40:]
+        except Exception:
+            return None
+
+    # ------------------------------------------------------------------
+    # Price from slot0
+    # ------------------------------------------------------------------
+
+    def _price_from_slot0(self, pool: str, base: str, quote: str) -> float | None:
+        """
+        Read sqrtPriceX96 from pool.slot0() and convert to quote-per-base.
+
+        slot0() selector: 0x3850c7bd
+        Returns: (uint160 sqrtPriceX96, int24 tick, ...)
+        sqrtPriceX96 is sqrt(token1/token0) in Q64.96 fixed-point.
+        """
+        try:
+            raw = self._eth_call(pool, "0x3850c7bd")
+        except Exception:
+            return None
+
+        sqrt_price_x96 = int(raw[:64], 16)
+        if sqrt_price_x96 == 0:
+            return None
+
+        # price_raw = token1_wei / token0_wei
+        price_raw = (sqrt_price_x96 / (2**96)) ** 2
+
+        base_tok = self.network.tokens[base]
+        quote_tok = self.network.tokens[quote]
+        token0 = self._get_token0(pool)
+
+        if token0 and token0.lower() == base_tok.address.lower():
+            # base is token0 → price_raw = quote_wei/base_wei
+            return price_raw * (10**base_tok.decimals) / (10**quote_tok.decimals)
+        else:
+            # base is token1 → price_raw = base_wei/quote_wei → invert
+            if price_raw == 0:
+                return None
+            return (1.0 / price_raw) * (10**base_tok.decimals) / (10**quote_tok.decimals)
+
+    def _get_token0(self, pool: str) -> str | None:
+        if pool in self._token0_cache:
+            return self._token0_cache[pool]
+        try:
+            result = self._eth_call(pool, "0x0dfe1681")
+            addr = "0x" + result[-40:]
+            self._token0_cache[pool] = addr
+            return addr
+        except Exception:
+            return None
+
+    # ------------------------------------------------------------------
+    # RPC (same pattern as V2 pricer)
+    # ------------------------------------------------------------------
+
+    def _eth_call(self, to: str, data: str) -> str:
+        payload = {
+            "jsonrpc": "2.0",
+            "method": "eth_call",
+            "params": [{"to": to, "data": data}, "latest"],
+            "id": 1,
+        }
+        req = urllib.request.Request(
+            self.rpc_url,
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json", "User-Agent": "PeanutTrade/1.0"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            result = json.loads(resp.read())
+        if "error" in result or not result.get("result"):
+            raise ValueError(f"eth_call {to}: {result.get('error', 'empty')}")
+        return result["result"][2:]

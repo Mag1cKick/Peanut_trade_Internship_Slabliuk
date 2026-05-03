@@ -196,6 +196,49 @@ _FALLBACK_RULES: dict[str, TradingRules] = {
         tick_size=0.01,
         min_notional=5.0,
     ),
+    # ARB — Arbitrum governance token (~$0.50), Binance lot size 0.1 ARB
+    "ARB/USDC": TradingRules(
+        symbol="ARB/USDC",
+        min_qty=0.1,
+        max_qty=9_000_000.0,
+        step_size=0.1,
+        min_price=0.0001,
+        max_price=10_000.0,
+        tick_size=0.0001,
+        min_notional=5.0,
+    ),
+    "ARB/USDT": TradingRules(
+        symbol="ARB/USDT",
+        min_qty=0.1,
+        max_qty=9_000_000.0,
+        step_size=0.1,
+        min_price=0.0001,
+        max_price=10_000.0,
+        tick_size=0.0001,
+        min_notional=5.0,
+    ),
+    # MAGIC — TreasureDAO gaming token (~$0.30), Arbitrum-native
+    "MAGIC/USDT": TradingRules(
+        symbol="MAGIC/USDT",
+        min_qty=0.1,
+        max_qty=9_000_000.0,
+        step_size=0.1,
+        min_price=0.0001,
+        max_price=10_000.0,
+        tick_size=0.0001,
+        min_notional=5.0,
+    ),
+    # PENDLE — yield trading protocol (~$3), Arbitrum-native
+    "PENDLE/USDT": TradingRules(
+        symbol="PENDLE/USDT",
+        min_qty=0.1,
+        max_qty=9_000_000.0,
+        step_size=0.1,
+        min_price=0.001,
+        max_price=10_000.0,
+        tick_size=0.001,
+        min_notional=5.0,
+    ),
 }
 
 

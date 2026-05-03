@@ -62,14 +62,9 @@ class Signal:
     def is_valid(self) -> bool:
         """
         True if this signal is still actionable.
+        score and expected_net_pnl are checked before enqueuing, not here.
         """
-        return (
-            time.time() < self.expiry
-            and self.inventory_ok
-            and self.within_limits
-            and self.expected_net_pnl > 0
-            and self.score > 0
-        )
+        return time.time() < self.expiry and self.inventory_ok and self.within_limits
 
     def age_seconds(self) -> float:
         """Seconds since this signal was generated."""

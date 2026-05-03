@@ -188,18 +188,22 @@ class SignalGenerator:
 
     def _dex_prices_from_engine(self, pair: str, size: float) -> tuple[float, float]:
         """
-        Query the Week 2 PricingEngine for effective DEX buy and sell prices.
+        Query the pricing module for effective DEX buy and sell prices.
+
+        UniswapDirectPricer / UniswapV3Pricer expose get_prices_for_pair() which
+        returns correctly-scaled (buy, sell) prices directly.  The older
+        PricingEngine path uses get_quote() with raw token amounts.
         """
+        if hasattr(self.pricing, "get_prices_for_pair"):
+            result = self.pricing.get_prices_for_pair(pair, size)
+            if result is None:
+                raise ValueError(f"No pool found for {pair}")
+            return result
+
+        # Legacy PricingEngine path (Week 2)
         base, quote = pair.split("/")
         token_in = self._get_token(base)
         token_out = self._get_token(quote)
-
-        buy_quote = self.pricing.get_quote(
-            token_out,
-            token_in,
-            int(size * 10**token_out.decimals),
-        )
-        dex_buy = float(buy_quote.expected_output) / (size * 10**token_in.decimals)
 
         sell_quote = self.pricing.get_quote(
             token_in,
@@ -208,6 +212,13 @@ class SignalGenerator:
             1,
         )
         dex_sell = float(sell_quote.expected_output) / (size * 10**token_out.decimals)
+
+        buy_quote = self.pricing.get_quote(
+            token_out,
+            token_in,
+            int(size * 10**token_out.decimals),
+        )
+        dex_buy = float(buy_quote.expected_output) / (size * 10**token_in.decimals)
 
         return dex_buy, dex_sell
 

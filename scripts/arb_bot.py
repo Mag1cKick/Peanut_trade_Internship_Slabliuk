@@ -23,6 +23,10 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 from exchange.client import ExchangeClient
 from executor.engine import ExecutionContext, Executor, ExecutorConfig, ExecutorState
 from executor.queue import SignalQueue
@@ -123,20 +127,24 @@ class ArbBot:
             from pricing.uniswap_direct import (
                 ARBITRUM,
                 ARBITRUM_SUSHI,
+                ARBITRUM_V3,
                 ETHEREUM,
                 UniswapDirectPricer,
+                UniswapV3Pricer,
             )
 
             _network_map = {
                 "arbitrum": ARBITRUM,
                 "arbitrum-sushi": ARBITRUM_SUSHI,
+                "arbitrum-v3": ARBITRUM_V3,
                 "ethereum": ETHEREUM,
             }
+            _pricer_cls = (
+                UniswapV3Pricer if "v3" in config.get("network", "") else UniswapDirectPricer
+            )
             network_cfg = _network_map.get(config.get("network", "arbitrum"), ARBITRUM)
             self.chain_client = ChainClient([rpc_url])
-            self.dex_pricer: UniswapDirectPricer | None = UniswapDirectPricer(
-                rpc_url, network=network_cfg
-            )
+            self.dex_pricer: UniswapDirectPricer | None = _pricer_cls(rpc_url, network=network_cfg)
             log.info("DEX pricer: %s (chain_id=%d)", network_cfg.name, network_cfg.chain_id)
         else:
             self.chain_client = None
@@ -255,6 +263,24 @@ class ArbBot:
         )
         self.pre_trade_validator = PreTradeValidator()
 
+        # Mock balances: used when CEX API keys are absent (dry-run / demo mode).
+        # Format mirrors ccxt fetch_balance: {"USDC": {"free": "100", "locked": "0"}, ...}
+        raw_mock = config.get("mock_balances", {})
+        self._mock_balances: dict = (
+            {k: {"free": str(v), "locked": "0"} for k, v in raw_mock.items()} if raw_mock else {}
+        )
+        if self._mock_balances:
+            log.info("Mock balances: %s", {k: v["free"] for k, v in self._mock_balances.items()})
+
+        # Session stats — accumulated each tick for the daily summary
+        self._session_start: float = time.time()
+        self._signals_seen: int = 0  # total signals that passed validation+risk
+        self._signals_skipped_reasons: dict[str, int] = {}  # reason → count
+        self._dry_run_count: int = 0  # how many would-have-traded
+        self._dry_run_spreads: list[float] = []
+        self._dry_run_pnls: list[float] = []
+        self._dry_run_scores: list[float] = []
+
         # Telegram alerter — no-op when env vars are absent
         self.alerter = make_alerter()
 
@@ -352,6 +378,9 @@ class ArbBot:
             valid, reason = self.pre_trade_validator.validate_signal(signal)
             if not valid:
                 SIGNALS_SKIPPED.labels(pair=pair, reason="validation").inc()
+                self._signals_skipped_reasons["validation"] = (
+                    self._signals_skipped_reasons.get("validation", 0) + 1
+                )
                 log.warning("Validation failed for %s: %s", pair, reason)
                 return
 
@@ -359,13 +388,20 @@ class ArbBot:
             allowed, reason = self.risk_manager.check_pre_trade(signal)
             if not allowed:
                 SIGNALS_SKIPPED.labels(pair=pair, reason="risk").inc()
+                self._signals_skipped_reasons["risk"] = (
+                    self._signals_skipped_reasons.get("risk", 0) + 1
+                )
                 log.warning("Risk check failed for %s: %s", pair, reason)
                 return
 
+            self._signals_seen += 1
             signal.score = self.scorer.score(signal, self.inventory.get_skews())
             SIGNAL_SCORE.labels(pair=pair).observe(signal.score)
             if signal.score < self.score_threshold:
                 SIGNALS_SKIPPED.labels(pair=pair, reason="low_score").inc()
+                self._signals_skipped_reasons["low_score"] = (
+                    self._signals_skipped_reasons.get("low_score", 0) + 1
+                )
                 log.info(
                     "Skipped %s: score %.1f below threshold %.1f",
                     pair,
@@ -438,6 +474,10 @@ class ArbBot:
                     expected_pnl,
                     signal.score,
                 )
+                self._dry_run_count += 1
+                self._dry_run_spreads.append(float(signal.spread_bps))
+                self._dry_run_pnls.append(expected_pnl)
+                self._dry_run_scores.append(signal.score)
                 continue
 
             t0 = time.monotonic()
@@ -452,6 +492,8 @@ class ArbBot:
             self.scorer.record_result(signal.pair, ctx.state == ExecutorState.DONE)
 
             self._log_trade(ctx)
+            if ctx.state == ExecutorState.DONE and not self.dry_run:
+                await self._verify_balances(ctx)
             if ctx.state == ExecutorState.DONE and ctx.actual_net_pnl is not None:
                 PNL_USD.labels(pair=signal.pair).observe(ctx.actual_net_pnl)
                 arb_record = execution_to_arb_record(ctx, self.fees)
@@ -496,6 +538,14 @@ class ArbBot:
                 break
 
     async def _sync_balances(self) -> None:
+        if self._mock_balances:
+            # Mock mode: inject simulated balances on both venues so inventory
+            # checks pass during dry-run without needing real funds.
+            self.inventory.update_from_cex(Venue.BINANCE, self._mock_balances)
+            wallet_balances = {k: v["free"] for k, v in self._mock_balances.items()}
+            self.inventory.update_from_wallet(Venue.WALLET, wallet_balances)
+            return
+
         try:
             cex_balances = self.exchange.fetch_balance()
             self.inventory.update_from_cex(Venue.BINANCE, cex_balances)
@@ -589,6 +639,60 @@ class ArbBot:
     # Monitoring helpers
     # ------------------------------------------------------------------
 
+    async def _verify_balances(self, ctx: ExecutionContext) -> None:
+        """
+        After a real trade, compare actual exchange balances against the
+        inventory tracker's expected values. A mismatch > threshold means
+        something went wrong (partial fill, fee accounting error, API bug)
+        and the bot should stop immediately.
+        """
+        pair = ctx.signal.pair
+        base, quote = pair.split("/")
+        threshold = 0.01  # 1% relative tolerance
+
+        try:
+            actual_cex = self.exchange.fetch_balance()
+        except Exception as exc:
+            log.warning("verify_balances: could not fetch CEX balance: %s", exc)
+            return
+
+        for asset in (base, quote):
+            actual = float(actual_cex.get(asset, {}).get("free", 0))
+            expected = float(self.inventory.get_available(Venue.BINANCE, asset))
+            if expected == 0:
+                continue
+            diff = abs(actual - expected) / expected
+            if diff > threshold:
+                msg = (
+                    f"BALANCE MISMATCH {asset}: "
+                    f"actual={actual:.6f} expected={expected:.6f} diff={diff:.1%}"
+                )
+                log.critical(msg)
+                await self.alerter.send(f"🚨 <b>Balance mismatch</b> — {msg}\nStopping bot.")
+                self.stop()
+                return
+
+        if self.chain_client is not None:
+            try:
+                actual_dex = self._fetch_wallet_balances()
+                expected_dex = float(self.inventory.get_available(Venue.WALLET, base))
+                actual_dex_base = float(actual_dex.get(base, 0))
+                if expected_dex > 0:
+                    diff = abs(actual_dex_base - expected_dex) / expected_dex
+                    if diff > threshold:
+                        msg = (
+                            f"WALLET MISMATCH {base}: "
+                            f"actual={actual_dex_base:.6f} expected={expected_dex:.6f} diff={diff:.1%}"
+                        )
+                        log.critical(msg)
+                        await self.alerter.send(f"🚨 <b>Wallet mismatch</b> — {msg}\nStopping bot.")
+                        self.stop()
+                        return
+            except Exception as exc:
+                log.warning("verify_balances: wallet check failed: %s", exc)
+
+        log.debug("Balance verification passed for %s", pair)
+
     def _log_trade(self, ctx: ExecutionContext) -> None:
         """Emit a structured TRADE log line parseable with grep."""
         direction = getattr(ctx.signal, "direction", None)
@@ -615,26 +719,67 @@ class ArbBot:
             await asyncio.sleep(30)
 
     async def _send_daily_summary(self) -> None:
-        """Send end-of-session Telegram summary of all recorded trades."""
+        """Send rich end-of-session Telegram summary covering dry-run and live stats."""
+        duration_min = (time.time() - self._session_start) / 60
+        mode_label = "DRY RUN" if self.dry_run else "LIVE"
         trades = self.pnl_engine.trades
-        if not trades:
-            await self.alerter.send("📊 <b>Daily Summary</b>: No trades this session")
-            return
-        total_pnl = sum(float(t.net_pnl) for t in trades)
-        wins = sum(1 for t in trades if float(t.net_pnl) > 0)
-        losses = len(trades) - wins
-        best = max(trades, key=lambda t: float(t.net_pnl))
-        worst = min(trades, key=lambda t: float(t.net_pnl))
-        await self.alerter.send(
-            f"📊 <b>Daily Summary</b>\n\n"
-            f"Trades: {len(trades)} ({wins}W / {losses}L)\n"
-            f"Win Rate: {wins / len(trades) * 100:.0f}%\n\n"
-            f"💰 PnL: <b>${total_pnl:+.2f}</b>\n"
-            f"Best:  ${float(best.net_pnl):+.2f}\n"
-            f"Worst: ${float(worst.net_pnl):+.2f}\n\n"
-            f"Capital: ${self.risk_manager.current_capital:.2f}\n"
-            f"Daily loss: ${self.risk_manager.daily_loss:.2f}"
-        )
+        skipped_total = sum(self._signals_skipped_reasons.values())
+
+        lines: list[str] = [
+            f"📊 <b>Session Summary [{mode_label}]</b>",
+            "",
+            f"⏱ Duration: {duration_min:.0f} min",
+            f"🔍 Signals: {self._signals_seen} passed  {skipped_total} blocked",
+        ]
+        if skipped_total:
+            reasons = "  ".join(
+                f"{r}:{n}" for r, n in sorted(self._signals_skipped_reasons.items())
+            )
+            lines.append(f"   blocked by: {reasons}")
+
+        # Dry-run breakdown
+        if self.dry_run and self._dry_run_count:
+            sp = self._dry_run_spreads
+            pn = self._dry_run_pnls
+            sc = self._dry_run_scores
+            lines += [
+                "",
+                f"🧪 <b>Dry-run: {self._dry_run_count} would-be trades</b>",
+                f"   Spread:  avg={sum(sp)/len(sp):.0f}  min={min(sp):.0f}  max={max(sp):.0f} bps",
+                f"   Exp PnL: avg=${sum(pn)/len(pn):.3f}  total=${sum(pn):.2f}",
+                f"   Score:   avg={sum(sc)/len(sc):.0f}  min={min(sc):.0f}  max={max(sc):.0f}",
+            ]
+        elif self.dry_run:
+            lines.append("\n🧪 Dry-run: no signals passed all checks")
+
+        # Live trade breakdown
+        if trades:
+            total_pnl = sum(float(t.net_pnl) for t in trades)
+            wins = sum(1 for t in trades if float(t.net_pnl) > 0)
+            losses = len(trades) - wins
+            best = max(trades, key=lambda t: float(t.net_pnl))
+            worst = min(trades, key=lambda t: float(t.net_pnl))
+            pnl_emoji = "✅" if total_pnl >= 0 else "🔻"
+            lines += [
+                "",
+                f"{pnl_emoji} <b>Trades: {len(trades)}  ({wins}W/{losses}L)  "
+                f"Win: {wins/len(trades)*100:.0f}%</b>",
+                f"   Net PnL: <b>${total_pnl:+.2f}</b>",
+                f"   Best: ${float(best.net_pnl):+.2f}   Worst: ${float(worst.net_pnl):+.2f}",
+            ]
+
+        # Capital & risk
+        peak = self.risk_manager._peak_capital
+        cap = self.risk_manager.current_capital
+        drawdown_pct = (peak - cap) / peak * 100 if peak > 0 else 0.0
+        lines += [
+            "",
+            f"💰 Capital: ${cap:.2f}  (drawdown {drawdown_pct:.1f}%)",
+            f"📉 Daily loss: ${self.risk_manager.daily_loss:.2f} / ${self.risk_limits.max_daily_loss:.2f}",
+            f"⚠️ Errors: {len(self._error_times)}",
+        ]
+
+        await self.alerter.send("\n".join(lines))
 
     async def emergency_flatten(self) -> None:
         """
@@ -759,17 +904,24 @@ if __name__ == "__main__":
         "apiKey": os.getenv("BINANCE_TESTNET_API_KEY"),
         "secret": os.getenv("BINANCE_TESTNET_SECRET"),  # pragma: allowlist secret
         "rpc_url": os.getenv("ARB_RPC_URL", os.getenv("ETH_RPC_URL", "")),
-        "network": "arbitrum",  # Uniswap V2 on Arbitrum — gas < $0.01/swap
-        "pairs": ["ETH/USDC"],  # WETH/USDC is the most liquid Arbitrum V2 pool
-        "trade_size": 0.1,
+        "network": "arbitrum-v3",
+        "pairs": ["MAGIC/USDT"],
+        "trade_size": 100.0,
         "score_threshold": 60.0,
         "signal_config": {
-            "min_spread_bps": 30,  # lower breakeven on Arbitrum (cheap gas)
-            "min_profit_usd": 1.0,
+            "min_spread_bps": 20,
+            "min_profit_usd": 0.01,
             "cooldown_seconds": 2,
             "signal_ttl_seconds": 5,
         },
-        "dry_run": True,  # Day 1: observe for ≥30 min before setting False
+        "risk_limits": {
+            "max_trade_usd": 25.0,
+            "max_daily_loss": 20.0,
+            "max_position_per_token": 500.0,
+        },
+        "dry_run": True,
+        # MAGIC in wallet needed so inventory_ok=True for the DEX sell leg
+        "mock_balances": {"USDT": 100.0, "MAGIC": 500.0},
         "metrics_port": int(os.getenv("METRICS_PORT", "8000")),
     }
 
@@ -780,22 +932,44 @@ if __name__ == "__main__":
         "mode": MODE_PROD,
         "apiKey": os.getenv("BINANCE_API_KEY"),
         "secret": os.getenv("BINANCE_SECRET"),  # pragma: allowlist secret
-        "rpc_url": os.getenv("ARB_RPC_URL", ""),  # Arbitrum RPC endpoint
-        "network": "arbitrum",
+        "rpc_url": os.getenv("ARB_RPC_URL", ""),
+        "network": "arbitrum-v3",
         "private_key_env": "PRIVATE_KEY",  # pragma: allowlist secret
-        "pairs": ["ETH/USDC"],
-        "trade_size": 0.05,  # smaller size for prod caution
-        "score_threshold": 70.0,  # higher bar in prod
+        # MAGIC/USDT: TreasureDAO token, Arbitrum-native V3 pool 100-300bps ahead
+        # of Binance — low bot competition ("forgotten pool" strategy).
+        # For even less competition, switch to "MAGIC/ETH" (TOKEN/WETH pairs
+        # have fewer OFA-integrated searchers than TOKEN/USDC per employer advice).
+        "pairs": ["MAGIC/USDT"],
+        "trade_size": 100.0,  # 100 MAGIC ≈ $6.40 at ~$0.064/MAGIC
+        "score_threshold": 60.0,
         "slippage_bps": 50,
         "unwind_slippage_bps": 150,
         "signal_config": {
-            "min_spread_bps": 60,
-            "min_profit_usd": 10.0,
+            # Breakeven on Arbitrum: CEX 10bps + DEX 30bps + gas ~$0.10
+            # On $6.40 notional gas alone = ~1.6% = 156bps — need spread > 200bps
+            # to net positive. Set conservatively above breakeven.
+            "min_spread_bps": 200,
+            "min_profit_usd": 0.05,  # at least $0.05 net after all costs
             "cooldown_seconds": 2,
             "signal_ttl_seconds": 5,
         },
-        # dry_run=False only after ≥30 min dry-run observation confirms healthy signals.
-        # Override via env: DRY_RUN=false python scripts/arb_bot.py --mode prod
+        # Risk limits for Day 1 live trading with $100 capital.
+        # All values sit well below the absolute hard limits:
+        #   ABSOLUTE_MAX_TRADE_USD=25  ABSOLUTE_MAX_DAILY_LOSS=20  ABSOLUTE_MIN_CAPITAL=50
+        "risk_limits": {
+            "max_trade_usd": 7.0,  # Day 1: ~$6.40/trade, slight headroom
+            "max_daily_loss": 10.0,  # stop for the day after -$10
+            "max_drawdown_pct": 0.15,  # halt at 15% drawdown ($15 on $100)
+            "max_trades_per_hour": 20,
+            "consecutive_loss_limit": 3,  # pause after 3 losses in a row
+            "max_position_per_token": 500.0,
+        },
+        # mock_balances: keep for dry-run (bot needs MAGIC to pass inventory check).
+        # Before going LIVE (dry_run=False): buy the actual MAGIC you'll trade with
+        # and remove this — the bot will use real on-chain balances instead.
+        "mock_balances": {"USDT": 100.0, "MAGIC": 500.0},
+        # dry_run=False only after ≥30 min observation confirms healthy signals.
+        # Activate live trading: DRY_RUN=false python scripts/arb_bot.py --mode prod
         "dry_run": os.getenv("DRY_RUN", "true").lower() != "false",
         "metrics_port": int(os.getenv("METRICS_PORT", "8000")),
     }
