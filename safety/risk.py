@@ -170,8 +170,12 @@ class PreTradeValidator:
     inventory check already failed, or no spread to trade on.
     """
 
-    # Spread above this is almost certainly bad price data, not real opportunity
-    MAX_SANE_SPREAD_BPS: float = 500.0
+    # Spread above this is almost certainly a price calculation error.
+    # 500 bps suits efficient pairs (ETH/USDC). Forgotten/stale pools on
+    # low-competition tokens legitimately show thousands of bps — the real
+    # ceiling is the point where the number is physically impossible (e.g.
+    # token would have to be priced at zero or infinity).
+    MAX_SANE_SPREAD_BPS: float = 50_000.0
 
     def validate_signal(self, signal) -> tuple[bool, str]:
         if float(signal.cex_price) <= 0:

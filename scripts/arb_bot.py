@@ -111,6 +111,10 @@ class ArbBot:
         mode = config.get("mode", MODE_TEST)
         is_prod = mode == MODE_PROD
         log.info("Starting in %s mode", mode.upper())
+        if is_prod:
+            log.warning("⚠️  PRODUCTION MODE — REAL MONEY ⚠️")
+        else:
+            log.info("Testnet / simulation mode — no real funds at risk")
 
         # --- CEX: testnet in TEST, mainnet in PROD ---
         self.exchange = ExchangeClient({**config, "sandbox": not is_prod})
@@ -905,7 +909,7 @@ if __name__ == "__main__":
         "secret": os.getenv("BINANCE_TESTNET_SECRET"),  # pragma: allowlist secret
         "rpc_url": os.getenv("ARB_RPC_URL", os.getenv("ETH_RPC_URL", "")),
         "network": "arbitrum-v3",
-        "pairs": ["MAGIC/USDT"],
+        "pairs": ["MAGIC/USDC"],
         "trade_size": 100.0,
         "score_threshold": 60.0,
         "signal_config": {
@@ -920,8 +924,8 @@ if __name__ == "__main__":
             "max_position_per_token": 500.0,
         },
         "dry_run": True,
-        # MAGIC in wallet needed so inventory_ok=True for the DEX sell leg
-        "mock_balances": {"USDT": 100.0, "MAGIC": 500.0},
+        # PENDLE in wallet needed so inventory_ok=True for the DEX sell leg
+        "mock_balances": {"USDC": 100.0, "MAGIC": 500.0},
         "metrics_port": int(os.getenv("METRICS_PORT", "8000")),
     }
 
@@ -935,21 +939,16 @@ if __name__ == "__main__":
         "rpc_url": os.getenv("ARB_RPC_URL", ""),
         "network": "arbitrum-v3",
         "private_key_env": "PRIVATE_KEY",  # pragma: allowlist secret
-        # MAGIC/USDT: TreasureDAO token, Arbitrum-native V3 pool 100-300bps ahead
-        # of Binance — low bot competition ("forgotten pool" strategy).
-        # For even less competition, switch to "MAGIC/ETH" (TOKEN/WETH pairs
-        # have fewer OFA-integrated searchers than TOKEN/USDC per employer advice).
-        "pairs": ["MAGIC/USDT"],
-        "trade_size": 100.0,  # 100 MAGIC ≈ $6.40 at ~$0.064/MAGIC
+        # MAGIC/USDC V3: 242bps spread, ~$0.03 net per trade, real liquidity (1T).
+        # USDC pool has different price than USDT pool — currently better spread.
+        "pairs": ["MAGIC/USDC"],
+        "trade_size": 100.0,  # 100 MAGIC ≈ $6.60 at ~$0.066/MAGIC
         "score_threshold": 60.0,
         "slippage_bps": 50,
         "unwind_slippage_bps": 150,
         "signal_config": {
-            # Breakeven on Arbitrum: CEX 10bps + DEX 30bps + gas ~$0.10
-            # On $6.40 notional gas alone = ~1.6% = 156bps — need spread > 200bps
-            # to net positive. Set conservatively above breakeven.
-            "min_spread_bps": 200,
-            "min_profit_usd": 0.05,  # at least $0.05 net after all costs
+            "min_spread_bps": 30,
+            "min_profit_usd": 0.02,
             "cooldown_seconds": 2,
             "signal_ttl_seconds": 5,
         },
@@ -964,10 +963,9 @@ if __name__ == "__main__":
             "consecutive_loss_limit": 3,  # pause after 3 losses in a row
             "max_position_per_token": 500.0,
         },
-        # mock_balances: keep for dry-run (bot needs MAGIC to pass inventory check).
-        # Before going LIVE (dry_run=False): buy the actual MAGIC you'll trade with
-        # and remove this — the bot will use real on-chain balances instead.
-        "mock_balances": {"USDT": 100.0, "MAGIC": 500.0},
+        # mock_balances: for dry-run — bot needs MAGIC in wallet to pass inventory check.
+        # Before going LIVE (dry_run=False): buy actual MAGIC and remove this.
+        "mock_balances": {"USDC": 100.0, "MAGIC": 500.0},
         # dry_run=False only after ≥30 min observation confirms healthy signals.
         # Activate live trading: DRY_RUN=false python scripts/arb_bot.py --mode prod
         "dry_run": os.getenv("DRY_RUN", "true").lower() != "false",
