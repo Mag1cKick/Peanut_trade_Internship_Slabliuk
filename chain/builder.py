@@ -27,18 +27,14 @@ class TransactionBuilder:
     def __init__(self, client: ChainClient, wallet: WalletManager) -> None:
         self._client = client
         self._wallet = wallet
-        # Required
         self._to: Address | None = None
         self._value: TokenAmount | None = None
         self._data: bytes | None = None
-        # Optional
         self._nonce: int | None = None
         self._gas_limit: int | None = None
         self._max_fee_per_gas: int | None = None
         self._max_priority_fee: int | None = None
         self._chain_id: int = 1
-
-    # ── Fluent setters ────────────────────────────────────────────────────────
 
     def to(self, address: Address) -> TransactionBuilder:
         """Set the recipient address."""
@@ -137,8 +133,6 @@ class TransactionBuilder:
         )
         return self
 
-    # ── Terminal methods ──────────────────────────────────────────────────────
-
     def build(self) -> TransactionRequest:
         """
         Validate all fields and return a TransactionRequest.
@@ -206,8 +200,6 @@ class TransactionBuilder:
         log.info("Waiting for confirmation: %s (timeout=%ds)", tx_hash, timeout)
         return self._client.wait_for_receipt(tx_hash, timeout=timeout)
 
-    # ── Internal helpers ──────────────────────────────────────────────────────
-
     def _validate_required(self) -> None:
         """Raise ValueError listing all missing required fields."""
         missing = []
@@ -265,9 +257,7 @@ class NonceManager:
         nm = NonceManager(client, Address("0x..."))
         tx1 = builder.nonce(nm.get_next()).build_and_sign()
         tx2 = builder.nonce(nm.get_next()).build_and_sign()
-        # Both can be broadcast immediately — nonces are sequential and unique.
 
-        # After a reorg or stuck transaction, re-sync with the chain:
         nm.sync()
     """
 
@@ -291,14 +281,14 @@ class NonceManager:
         with self._lock:
             self._ensure_initialized()
             nonce = self._nonce
-            self._nonce += 1  # type: ignore[operator]
-            return nonce  # type: ignore[return-value]
+            self._nonce += 1
+            return nonce
 
     def peek(self) -> int:
         """Return the current nonce without incrementing."""
         with self._lock:
             self._ensure_initialized()
-            return self._nonce  # type: ignore[return-value]
+            return self._nonce
 
     def sync(self) -> None:
         """

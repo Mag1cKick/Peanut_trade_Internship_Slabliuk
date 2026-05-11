@@ -46,8 +46,6 @@ from monitoring.metrics import (
 )
 from monitoring.telegram import make_alerter
 
-# Arbitrum One ERC-20 token addresses and decimals.
-# Used by _fetch_wallet_balances to query on-chain balances for trading pairs.
 _ERC20_ADDRESSES: dict[str, str] = {
     "USDT": "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9",
     "USDC": "0xFF970A61A04b1cA14834A43f5dE4533eBDDB5CC8",
@@ -100,13 +98,6 @@ def _configure_logging() -> None:
 _configure_logging()
 log = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Operating modes
-# ---------------------------------------------------------------------------
-# TEST: Binance testnet + real DEX prices from mainnet RPC, no execution.
-#       Safe for development — no real funds at risk.
-# PROD: Binance mainnet + DEX mainnet with real transaction execution.
-#       Requires PRIVATE_KEY env var and a funded wallet.
 MODE_TEST = "test"
 MODE_PROD = "prod"
 
@@ -121,15 +112,8 @@ class ArbBot:
         else:
             log.info("Testnet / simulation mode — no real funds at risk")
 
-        # --- CEX: testnet in TEST, mainnet in PROD ---
         self.exchange = ExchangeClient({**config, "sandbox": not is_prod})
 
-        # --- Chain + DEX pricing ---
-        # Both modes use real mainnet RPC for accurate DEX prices.
-        # UniswapDirectPricer queries Uniswap V2 pool reserves directly — no
-        # fork simulator needed, works for price data in both TEST and PROD.
-        # PricingEngine (with ForkSimulator) is additionally wired in PROD mode
-        # for execution-time quote validation via local Anvil fork.
         rpc_url = config.get("rpc_url", "")
         if rpc_url:
             from chain.client import ChainClient
@@ -159,8 +143,6 @@ class ArbBot:
             self.chain_client = None
             self.dex_pricer = None
 
-        # Full PricingEngine for execution validation — requires a local Anvil
-        # fork (fork_url) and is only set up in PROD mode.
         self.pricing_engine = None
         if is_prod and rpc_url and config.get("fork_url"):
             try:
@@ -173,7 +155,6 @@ class ArbBot:
                     fork_sim,
                     config.get("ws_url", ""),
                 )
-                # Load configured pools so the router can build quotes
                 if config.get("pool_addresses"):
                     from core.types import Address
 
@@ -184,7 +165,6 @@ class ArbBot:
                     "PricingEngine setup failed (%s) — using direct pricer for execution", exc
                 )
 
-        # --- Wallet: required for PROD, optional for TEST ---
         wallet = None
         if is_prod:
             from core.wallet import WalletManager
@@ -202,8 +182,6 @@ class ArbBot:
         self.inventory = InventoryTracker([Venue.BINANCE, Venue.WALLET])
         self.pnl_engine = PnLEngine()
 
-        # Fee structure: use Config defaults unless overridden in the run config.
-        # Config.GAS_COST_USD defaults to $0.10 for Arbitrum (vs $5 mainnet).
         _cex_bps = config.get("cex_taker_bps", Config.CEX_TAKER_BPS)
         _dex_bps = config.get("dex_swap_bps", Config.DEX_SWAP_BPS)
         _gas = config.get("gas_cost_usd", Config.GAS_COST_USD)
@@ -213,12 +191,9 @@ class ArbBot:
             dex_swap_bps=_dex_bps,
             gas_cost_usd=_gas,
         )
-        # Generator uses UniswapDirectPricer for live pool reserve quotes.
-        # Executor uses PricingEngine (with fork sim) in PROD for execution
-        # validation; falls back to UniswapDirectPricer when no fork available.
         self.generator = SignalGenerator(
             self.exchange,
-            self.dex_pricer,  # direct pool queries — works without fork
+            self.dex_pricer,
             self.inventory,
             self.fees,
             config.get("signal_config", {}),
@@ -229,7 +204,7 @@ class ArbBot:
         self.scorer = SignalScorer(ScorerConfig(**_sc) if _sc else None)
         self.executor = Executor(
             self.exchange,
-            self.pricing_engine or self.dex_pricer,  # PricingEngine if available
+            self.pricing_engine or self.dex_pricer,
             self.inventory,
             ExecutorConfig(
                 simulation_mode=not is_prod,
@@ -253,12 +228,10 @@ class ArbBot:
         self._trade_usd: float = config.get("trade_usd", 0.0)
         self.score_threshold: float = config.get("score_threshold", 50.0)
         self.min_profit_usd: float = config.get("min_profit_usd", 0.03)
-        # Max BUY_DEX_SELL_CEX trades before pausing (protects Binance LINK inventory)
         self._max_dex_buy_trades: int = int(
             os.getenv("MAX_DEX_BUY_TRADES", config.get("max_dex_buy_trades", 0))
         )
         self._dex_buy_trade_count: int = 0
-        # Bridge destination (Binance BEP20 LINK deposit address)
         self._bep20_link_address: str = os.getenv("BINANCE_BEP20_LINK_ADDRESS", "")
         self.metrics_port: int = config.get("metrics_port", 0)
         self._wallet_address: str | None = (
@@ -266,10 +239,8 @@ class ArbBot:
         )
         self.running = False
 
-        # Priority queue: holds scored signals waiting for execution
         self._queue: SignalQueue = SignalQueue(maxsize=config.get("queue_maxsize", 50))
 
-        # Risk management — conservative limits by default, tighten for prod
         risk_cfg = config.get("risk_limits", {})
         self.risk_limits = RiskLimits(
             max_trade_usd=risk_cfg.get("max_trade_usd", 5.0),
@@ -288,8 +259,6 @@ class ArbBot:
         )
         self.pre_trade_validator = PreTradeValidator()
 
-        # Mock balances: used when CEX API keys are absent (dry-run / demo mode).
-        # Format mirrors ccxt fetch_balance: {"USDC": {"free": "100", "locked": "0"}, ...}
         raw_mock = config.get("mock_balances", {})
         self._mock_balances: dict = (
             {k: {"free": str(v), "locked": "0"} for k, v in raw_mock.items()} if raw_mock else {}
@@ -297,36 +266,28 @@ class ArbBot:
         if self._mock_balances:
             log.info("Mock balances: %s", {k: v["free"] for k, v in self._mock_balances.items()})
 
-        # Session stats — accumulated each tick for the daily summary
         self._session_start: float = time.time()
         self._last_status_log: float = 0.0
-        self._signals_seen: int = 0  # total signals that passed validation+risk
-        self._signals_skipped_reasons: dict[str, int] = {}  # reason → count
-        self._dry_run_count: int = 0  # how many would-have-traded
+        self._signals_seen: int = 0
+        self._signals_skipped_reasons: dict[str, int] = {}
+        self._dry_run_count: int = 0
         self._dry_run_spreads: list[float] = []
         self._dry_run_pnls: list[float] = []
         self._dry_run_scores: list[float] = []
 
-        # Telegram alerter — no-op when env vars are absent
         self.alerter = make_alerter()
 
-        # Error-rate tracking: timestamps of tick-level exceptions (rolling 1-hour window)
         self._error_times: deque[float] = deque()
-        # Suppress repeated circuit-breaker Telegram alerts (alert at most every 5 min)
         self._cb_last_alerted: float = 0.0
-        # Periodic balance sync — refresh every 30s so manual Binance changes are detected
         self._last_balance_sync: float = 0.0
         self._balance_sync_interval: float = 30.0
 
-        # Dry-run: generate + validate + risk-check signals but do NOT execute.
-        # Default True so the bot is safe out of the box; must be explicitly
-        # set to False in prod config after a successful dry-run observation period.
         self.dry_run: bool = config.get("dry_run", True)
         self.one_shot: bool = config.get("one_shot", False)
         if self.dry_run:
             log.info("DRY RUN mode — signals will be logged but NOT executed")
 
-        self._portfolio_start: float | None = None  # captured at run() startup
+        self._portfolio_start: float | None = None
 
     async def run(self) -> None:
         self.running = True
@@ -348,8 +309,6 @@ class ArbBot:
             log.info("Portfolio value at start: $%.4f", self._portfolio_start)
             self.risk_manager.current_capital = self._portfolio_start
 
-        # Dead man's switch: heartbeat written every 30 s so an external watchdog
-        # can detect if the bot hangs (see scripts/watchdog.sh for the counterpart).
         asyncio.create_task(self._heartbeat_loop())
 
         try:
@@ -359,7 +318,6 @@ class ArbBot:
                     await asyncio.sleep(1)
                 except Exception as exc:
                     log.error("Tick error: %s", exc)
-                    # Track errors for auto-kill if rate exceeds 50/hour
                     now_m = time.monotonic()
                     self._error_times.append(now_m)
                     cutoff = now_m - 3600.0
@@ -377,11 +335,8 @@ class ArbBot:
     async def _tick(self) -> None:
         # Kill switch: operator can halt the bot by creating /tmp/arb_bot_kill
         if is_kill_switch_active():
-            # Pause trading — DO NOT stop the process.
-            # Remove /tmp/arb_bot_kill to resume. Bot stays alive so heartbeat
-            # keeps writing and open positions are not abandoned mid-execution.
             now_m = time.monotonic()
-            if now_m - self._cb_last_alerted > 300:  # alert at most every 5 min
+            if now_m - self._cb_last_alerted > 300:
                 self._cb_last_alerted = now_m
                 logging.critical(
                     "KILL SWITCH ACTIVE — trading paused, remove %s to resume", KILL_SWITCH_FILE
@@ -390,25 +345,27 @@ class ArbBot:
                     f"🚨 <b>KILL SWITCH ACTIVE</b> — trading paused\n"
                     f"Remove <code>{KILL_SWITCH_FILE}</code> to resume"
                 )
-            return  # skip this tick, check again next second
+            return
 
         cb = self.executor.circuit_breaker
 
-        # Periodic balance sync — detects manual Binance changes (buy/withdraw) within 30s
         now_t = time.monotonic()
         if now_t - self._last_balance_sync >= self._balance_sync_interval:
             await self._sync_balances()
             self._last_balance_sync = now_t
 
-        # Periodic status line every 60s — useful during live demo
         if now_t - self._last_status_log >= 60:
             self._last_status_log = now_t
             try:
                 session_trades = len(self.pnl_engine.trades)
                 session_pnl = sum(float(t.net_pnl) for t in self.pnl_engine.trades)
                 inv = self.inventory
-                b_link = inv._balances.get("LINK", {}).get("binance", 0)
-                w_usdt = inv._balances.get("USDT", {}).get("wallet", 0)
+                from inventory.tracker import Venue
+
+                _bl = inv._balances.get(Venue.BINANCE, {}).get("LINK")
+                _wu = inv._balances.get(Venue.WALLET, {}).get("USDT")
+                b_link = float(_bl.free) if _bl else 0.0
+                w_usdt = float(_wu.free) if _wu else 0.0
                 log.info(
                     "STATUS | session: %d trades  pnl=%+.4f | "
                     "binance LINK=%.2f  wallet USDT=$%.2f | "
@@ -423,26 +380,18 @@ class ArbBot:
             except Exception:
                 pass
 
-        # Update circuit-breaker gauge for Prometheus
         CIRCUIT_BREAKER_OPEN.set(1 if cb.is_open() else 0)
 
         if cb.is_open():
             secs = cb.time_until_reset()
             log.info("Circuit breaker open — %.0fs until reset", secs)
-            # Alert at most once per 5 minutes to avoid Telegram spam
             now_m = time.monotonic()
             if now_m - self._cb_last_alerted > 300:
                 self._cb_last_alerted = now_m
                 await self.alerter.send(f"⚡ <b>Circuit breaker OPEN</b>\nResets in {secs:.0f}s")
             return
 
-        # Phase 1: generate + score all pairs concurrently.
-        # Each pair's price fetch is independent — run them in parallel so a
-        # slow exchange response on one pair doesn't delay the others.
-        # (AsyncIO docs: use gather for independent concurrent coroutines.)
         async def _generate_one(pair: str) -> None:
-            # Compute token size from USD target so trade_value stays ≤ max_trade_usd
-            # regardless of price movements.
             if self._trade_usd > 0:
                 try:
                     ob = self.exchange.fetch_order_book(pair)
@@ -468,7 +417,6 @@ class ArbBot:
             SIGNALS_GENERATED.labels(pair=pair).inc()
             SPREAD_BPS.labels(pair=pair).observe(signal.spread_bps)
 
-            # Pre-trade sanity check (prices, TTL, within_limits)
             valid, reason = self.pre_trade_validator.validate_signal(signal)
             if not valid:
                 SIGNALS_SKIPPED.labels(pair=pair, reason="validation").inc()
@@ -478,7 +426,6 @@ class ArbBot:
                 log.warning("Validation failed for %s: %s", pair, reason)
                 return
 
-            # Risk limits check (daily loss, drawdown, size, rate)
             allowed, reason = self.risk_manager.check_pre_trade(signal)
             if not allowed:
                 SIGNALS_SKIPPED.labels(pair=pair, reason="risk").inc()
@@ -528,14 +475,11 @@ class ArbBot:
 
         await asyncio.gather(*[_generate_one(p) for p in self.pairs])
 
-        # Phase 2: drain the queue highest-score-first
         while True:
             signal = self._queue.get()
             if signal is None:
                 break
 
-            # Reject signals whose score has decayed below half the threshold
-            # while waiting in the queue — market conditions have moved on.
             decayed = self.scorer.apply_decay(signal)
             if decayed < self.score_threshold * 0.5:
                 SIGNALS_SKIPPED.labels(pair=signal.pair, reason="decayed").inc()
@@ -555,8 +499,6 @@ class ArbBot:
                 decayed,
             )
 
-            # Absolute safety gate — final check before any real execution.
-            # Skipped in simulation mode: these limits guard real capital only.
             if not self.executor.config.simulation_mode:
                 trade_usd = float(signal.size) * float(signal.cex_price)
                 safe, reason = safety_check(
@@ -570,7 +512,6 @@ class ArbBot:
                     log.critical("SAFETY CHECK BLOCKED trade: %s", reason)
                     continue
 
-            # Dry-run gate: log the would-be trade and skip execution.
             if self.dry_run:
                 direction = getattr(signal, "direction", None)
                 dir_str = direction.value if direction is not None else "?"
@@ -613,7 +554,6 @@ class ArbBot:
             if ctx.state == ExecutorState.DONE and not self.dry_run:
                 await self._sync_balances()
                 await self._verify_balances(ctx)
-                # Track BUY_DEX_SELL_CEX count and trigger bridge/alert when needed
                 from strategy.signal import Direction
 
                 if ctx.signal.direction == Direction.BUY_DEX_SELL_CEX:
@@ -630,7 +570,6 @@ class ArbBot:
                             "Max DEX buy trades (%d) reached — stopping", self._max_dex_buy_trades
                         )
                         self.stop()
-                # rebalance is manual — bridge LINK wallet->Binance manually when needed
             if ctx.state == ExecutorState.DONE and ctx.actual_net_pnl is not None:
                 PNL_USD.labels(pair=signal.pair).observe(ctx.actual_net_pnl)
                 arb_record = execution_to_arb_record(ctx, self.fees)
@@ -683,15 +622,12 @@ class ArbBot:
 
             await self._sync_balances()
 
-            # Stop draining if breaker just tripped
             if cb.is_open():
                 CIRCUIT_BREAKER_OPEN.set(1)
                 break
 
     async def _sync_balances(self) -> None:
         if self._mock_balances:
-            # Mock mode: inject simulated balances on both venues so inventory
-            # checks pass during dry-run without needing real funds.
             self.inventory.update_from_cex(Venue.BINANCE, self._mock_balances)
             wallet_balances = {k: v["free"] for k, v in self._mock_balances.items()}
             self.inventory.update_from_wallet(Venue.WALLET, wallet_balances)
@@ -792,10 +728,6 @@ class ArbBot:
     def stop(self) -> None:
         self.running = False
 
-    # ------------------------------------------------------------------
-    # Rebalancing
-    # ------------------------------------------------------------------
-
     async def _db_record_trade(self, ctx: ExecutionContext) -> None:
         """Persist a completed trade to the SQLite ledger."""
         try:
@@ -855,9 +787,8 @@ class ArbBot:
 
         trade_usd = self._trade_usd or (self.trade_size * 10)
         if b_link >= self.trade_size and w_usdt >= trade_usd:
-            return  # both venues have enough — no rebalance needed
+            return
 
-        # Live 50/50 targets from actual total holdings
         target_link = (w_link + b_link) / 2
         target_usdt = (w_usdt + b_usdt) / 2
 
@@ -873,12 +804,10 @@ class ArbBot:
         )
 
         actions: list[str] = []
-        MIN_LINK_MOVE = 0.5  # don't bridge tiny amounts
-        MIN_USDT_MOVE = 3.0  # don't transfer tiny amounts
+        MIN_LINK_MOVE = 0.5
+        MIN_USDT_MOVE = 3.0
 
-        # ── LINK ──────────────────────────────────────────────────────────
-        link_delta = w_link - target_link  # positive: wallet has surplus → bridge to Binance
-        # negative: Binance has surplus → alert only
+        link_delta = w_link - target_link
 
         if link_delta >= MIN_LINK_MOVE and self._bep20_link_address:
             log.info("Bridging %.4f %s wallet -> BSC", link_delta, base)
@@ -921,9 +850,7 @@ class ArbBot:
                 f"Buy {target_link:.2f} {base} on Binance (have {b_link:.4f}, need {self.trade_size:.2f})"
             )
 
-        # ── USDT ──────────────────────────────────────────────────────────
-        usdt_delta = w_usdt - target_usdt  # positive: wallet surplus → send to Binance
-        # negative: Binance surplus → withdraw to wallet
+        usdt_delta = w_usdt - target_usdt
 
         usdt_dep_addr = os.getenv("BINANCE_USDT_DEPOSIT_ADDRESS", "")
 
@@ -967,7 +894,6 @@ class ArbBot:
             )
 
         elif usdt_delta <= -MIN_USDT_MOVE:
-            # Binance has surplus USDT — can't auto-withdraw (requires API withdrawal permission)
             actions.append(
                 f"Manual: withdraw ${-usdt_delta:.2f} USDT from Binance to wallet via Arbitrum One"
             )
@@ -982,10 +908,6 @@ class ArbBot:
                 f"\n{summary}"
             )
 
-    # ------------------------------------------------------------------
-    # Monitoring helpers
-    # ------------------------------------------------------------------
-
     async def _verify_balances(self, ctx: ExecutionContext) -> None:
         """
         After a real trade, compare actual exchange balances against the
@@ -995,7 +917,7 @@ class ArbBot:
         """
         pair = ctx.signal.pair
         base, quote = pair.split("/")
-        threshold = 0.01  # 1% relative tolerance
+        threshold = 0.01
 
         try:
             actual_cex = self.exchange.fetch_balance()
@@ -1101,7 +1023,6 @@ class ArbBot:
         trades = self.pnl_engine.trades
         skipped_total = sum(self._signals_skipped_reasons.values())
 
-        # Real portfolio PnL from live balances
         if portfolio_end is not None and self._portfolio_start is not None:
             session_pnl = portfolio_end - self._portfolio_start
             sign = "+" if session_pnl >= 0 else ""
@@ -1123,7 +1044,6 @@ class ArbBot:
             )
             lines.append(f"   blocked by: {reasons}")
 
-        # Dry-run breakdown
         if self.dry_run and self._dry_run_count:
             sp = self._dry_run_spreads
             pn = self._dry_run_pnls
@@ -1138,7 +1058,6 @@ class ArbBot:
         elif self.dry_run:
             lines.append("\n🧪 Dry-run: no signals passed all checks")
 
-        # Live trade breakdown
         if trades:
             total_pnl = sum(float(t.net_pnl) for t in trades)
             wins = sum(1 for t in trades if float(t.net_pnl) > 0)
@@ -1154,7 +1073,6 @@ class ArbBot:
                 f"   Best: ${float(best.net_pnl):+.2f}   Worst: ${float(worst.net_pnl):+.2f}",
             ]
 
-        # Capital & risk
         peak = self.risk_manager._peak_capital
         cap = self.risk_manager.current_capital
         drawdown_pct = (peak - cap) / peak * 100 if peak > 0 else 0.0
@@ -1166,7 +1084,6 @@ class ArbBot:
         ]
 
         await self.alerter.send("\n".join(lines))
-        # Print clean summary to console (strip HTML tags for readability)
         import re
 
         plain = re.sub(r"<[^>]+>", "", "\n".join(lines))
@@ -1301,8 +1218,6 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    # Week 6 day-based risk limit schedule
-    # trade_usd sets the dynamic trade size (floor division keeps it under max_trade_usd)
     _DAY_RISK_LIMITS: dict[int, dict] = {
         1: {
             "max_trade_usd": 7.0,
@@ -1336,14 +1251,10 @@ if __name__ == "__main__":
         },
     }
 
-    # --- TEST mode config ---
-    # Binance testnet (sandbox=True set automatically by ArbBot based on mode).
-    # Real mainnet RPC for accurate DEX prices.
-    # No execution — simulation_mode=True is set automatically.
     _TEST_CONFIG: dict = {
         "mode": MODE_TEST,
         "apiKey": os.getenv("BINANCE_TESTNET_API_KEY"),
-        "secret": os.getenv("BINANCE_TESTNET_SECRET"),  # pragma: allowlist secret
+        "secret": os.getenv("BINANCE_TESTNET_SECRET"),
         "rpc_url": os.getenv("ARB_RPC_URL", os.getenv("ETH_RPC_URL", "")),
         "network": "arbitrum-v3",
         "pairs": ["MAGIC/USDT"],
@@ -1361,31 +1272,24 @@ if __name__ == "__main__":
             "max_position_per_token": 500.0,
         },
         "dry_run": True,
-        # PENDLE in wallet needed so inventory_ok=True for the DEX sell leg
         "mock_balances": {"USDT": 100.0, "MAGIC": 500.0},
         "metrics_port": int(os.getenv("METRICS_PORT", "8000")),
     }
 
-    # --- PROD mode config ---
-    # Binance mainnet + Arbitrum DEX execution.
-    # Requires env vars: PRIVATE_KEY, BINANCE_API_KEY, BINANCE_SECRET, ARB_RPC_URL  # pragma: allowlist secret
     _PROD_CONFIG: dict = {
         "mode": MODE_PROD,
         "apiKey": os.getenv("BINANCE_API_KEY"),
-        "secret": os.getenv("BINANCE_SECRET"),  # pragma: allowlist secret
+        "secret": os.getenv("BINANCE_SECRET"),
         "rpc_url": os.getenv("ARB_RPC_URL", ""),
         "network": "arbitrum-v3",
         "private_key_env": "PRIVATE_KEY",  # pragma: allowlist secret
-        # LINK/USDT V3 fee=3000: real depth (1e18 liq), persistent ~40-47 bps spread.
         # Quoter-verified: 1 LINK trade deviates only 0.3% from slot0 (just pool fee).
         "pairs": ["LINK/USDT"],
-        "trade_size": 1.0,  # fallback (overridden by trade_usd below)
-        "trade_usd": 9.90,  # trade exactly $9.90 worth — always under $10 limit
+        "trade_size": 1.0,
+        "trade_usd": 9.90,
         "score_threshold": 50.0,
         "slippage_bps": 200,
         "unwind_slippage_bps": 150,
-        # Quoter prices already include the pool fee — do NOT charge dex_swap_bps again.
-        # Gas on Arbitrum One is typically $0.01-0.03 for a V3 swap.
         "dex_swap_bps": 0,
         "gas_cost_usd": 0.02,
         "signal_config": {
@@ -1394,28 +1298,19 @@ if __name__ == "__main__":
             "cooldown_seconds": 2,
             "signal_ttl_seconds": 5,
         },
-        # Scorer calibrated for LINK: 50 bps is excellent (not 100), 15 bps CEX bid-ask is liquid (not 5)
         "scorer_config": {
             "excellent_spread_bps": 50.0,
             "min_spread_bps": 15.0,
             "liquid_spread_threshold_bps": 15.0,
         },
-        # Risk limits for Day 1 live trading with $100 capital.
-        # All values sit well below the absolute hard limits:
-        #   ABSOLUTE_MAX_TRADE_USD=25  ABSOLUTE_MAX_DAILY_LOSS=20  ABSOLUTE_MIN_CAPITAL=50
         "risk_limits": {
-            "max_trade_usd": 7.0,  # Day 1: ~$6.40/trade, slight headroom
-            "max_daily_loss": 10.0,  # stop for the day after -$10
-            "max_drawdown_pct": 0.15,  # halt at 15% drawdown ($15 on $100)
+            "max_trade_usd": 7.0,
+            "max_daily_loss": 10.0,
+            "max_drawdown_pct": 0.15,
             "max_trades_per_hour": 20,
-            "consecutive_loss_limit": 3,  # pause after 3 losses in a row
+            "consecutive_loss_limit": 3,
             "max_position_per_token": 500.0,
         },
-        # mock_balances: uncomment ONLY for dry-run without real funds.
-        # For live trading (dry_run=False) remove this — bot reads real balances.
-        # "mock_balances": {"USDT": 100.0, "MAGIC": 500.0},
-        # dry_run=False only after ≥30 min observation confirms healthy signals.
-        # Activate live trading: DRY_RUN=false python scripts/arb_bot.py --mode prod --day 1
         "dry_run": os.getenv("DRY_RUN", "true").lower() != "false",
         "metrics_port": int(os.getenv("METRICS_PORT", "8000")),
     }

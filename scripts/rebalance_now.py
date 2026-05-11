@@ -11,8 +11,8 @@ Manual only:
   Binance USDT surplus -> withdraw via Arbitrum One on Binance manually
 
 Usage:
-    python scripts/rebalance_now.py             # dry-run
-    python scripts/rebalance_now.py --execute   # execute
+    python scripts/rebalance_now.py
+    python scripts/rebalance_now.py --execute
 """
 
 import argparse
@@ -102,10 +102,9 @@ def main():
     print(f"Target:  {tl:.4f} LINK each   ${tu:.2f} USDT each")
     print(f'Mode:    {"EXECUTE" if exe else "DRY RUN (pass --execute to transfer)"}')
 
-    ld = w_link - tl  # positive = wallet surplus -> bridge
-    ud = w_usdt - tu  # positive = wallet surplus -> send to Binance
+    ld = w_link - tl
+    ud = w_usdt - tu
 
-    # LINK
     if ld >= MIN_LINK:
         bep = os.getenv("BINANCE_BEP20_LINK_ADDRESS", "")
         if not bep:
@@ -128,7 +127,6 @@ def main():
     else:
         print(f"\nLINK: balanced ({ld:+.4f})")
 
-    # USDT
     if ud >= MIN_USDT:
         dep = os.getenv("BINANCE_USDT_DEPOSIT_ADDRESS", "")
         if not dep:

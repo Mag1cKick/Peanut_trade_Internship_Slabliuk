@@ -9,18 +9,12 @@ from __future__ import annotations
 
 import os
 
-# ---------------------------------------------------------------------------
-# Absolute safety constants — DO NOT MODIFY THESE VALUES
-# ---------------------------------------------------------------------------
-
 ABSOLUTE_MAX_TRADE_USD = 25.0
 ABSOLUTE_MAX_DAILY_LOSS = 20.0
 ABSOLUTE_MIN_CAPITAL = 50.0
 ABSOLUTE_MAX_TRADES_PER_HOUR = 30
 
-# ---------------------------------------------------------------------------
 # Kill switch
-# ---------------------------------------------------------------------------
 
 KILL_SWITCH_FILE = "/tmp/arb_bot_kill"
 
@@ -47,11 +41,6 @@ def trigger_kill_switch(reason: str = "") -> None:
         )
     except OSError as exc:
         logging.getLogger(__name__).error("Failed to arm kill switch: %s", exc)
-
-
-# ---------------------------------------------------------------------------
-# Final safety gate
-# ---------------------------------------------------------------------------
 
 
 def safety_check(
