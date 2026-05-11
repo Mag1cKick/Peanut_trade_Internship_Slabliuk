@@ -11,7 +11,7 @@ Usage:
     from config.settings import Config, TradingRules, get_trading_rules
 
     cfg = Config()
-    print(cfg.binance_base_url)   # "https://testnet.binance.vision" or prod URL
+    print(cfg.binance_base_url)
     rules = get_trading_rules("ETH/USDC", exchange_client)
     safe_qty = rules.round_quantity(0.123456789)
 """
@@ -21,10 +21,6 @@ from __future__ import annotations
 import math
 import os
 from dataclasses import dataclass
-
-# ---------------------------------------------------------------------------
-# Main config
-# ---------------------------------------------------------------------------
 
 
 class Config:
@@ -37,36 +33,31 @@ class Config:
 
     PRODUCTION: bool = os.getenv("PRODUCTION", "false").lower() == "true"
 
-    # --- Binance ---
     if PRODUCTION:
         BINANCE_BASE_URL = "https://api.binance.com"
         BINANCE_WS_URL = "wss://stream.binance.com:9443/ws"
-        CEX_FEE_BPS = 10.0  # real Binance taker 0.10%
+        CEX_FEE_BPS = 10.0
     else:
         BINANCE_BASE_URL = "https://testnet.binance.vision"
         BINANCE_WS_URL = "wss://testnet.binance.vision/ws"
-        CEX_FEE_BPS = 10.0  # testnet charges the same fee structure
+        CEX_FEE_BPS = 10.0
 
-    # --- Arbitrum One ---
     ARBITRUM_RPC = os.getenv("ARB_RPC_URL", "https://arb1.arbitrum.io/rpc")
     ARBITRUM_CHAIN_ID = 42161
     ARBITRUM_ROUTER = "0x4752ba5dbc23f44d87826276bf6fd6b1c372ad24"
     ARBITRUM_FACTORY = "0xf1D7CC64Fb4452F05c498126312eBE29f30Fbcf9"
 
-    # --- Token addresses (Arbitrum One) ---
     WETH_ADDRESS = "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"
-    USDC_ADDRESS = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"  # native USDC
+    USDC_ADDRESS = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
     USDT_ADDRESS = "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9"
 
-    # --- Trading defaults ---
     PAIR = "ETH/USDC"
-    TRADE_SIZE_ETH = 0.05  # start small in prod
-    SCORE_THRESHOLD = 70.0  # only high-confidence signals
+    TRADE_SIZE_ETH = 0.05
+    SCORE_THRESHOLD = 70.0
 
-    # --- Fee structure for Arbitrum (gas is cheap) ---
-    CEX_TAKER_BPS = 10.0  # Binance 0.1%
-    DEX_SWAP_BPS = 30.0  # Uniswap V2 0.3%
-    GAS_COST_USD = 0.10  # Arbitrum: $0.05 – $0.20 per swap
+    CEX_TAKER_BPS = 10.0
+    DEX_SWAP_BPS = 30.0
+    GAS_COST_USD = 0.10
 
     @classmethod
     def to_fee_structure(cls):
@@ -83,17 +74,12 @@ class Config:
     def to_signal_config(cls) -> dict:
         """Return a signal config dict with production-appropriate thresholds."""
         return {
-            "min_spread_bps": 40.0,  # must clear fees (~40 bps on Arbitrum)
-            "min_profit_usd": 1.0,  # at least $1 net after all costs
+            "min_spread_bps": 40.0,
+            "min_profit_usd": 1.0,
             "cooldown_seconds": 2.0,
             "signal_ttl_seconds": 5.0,
-            "max_position_usd": 500.0,  # hard cap until proven stable
+            "max_position_usd": 500.0,
         }
-
-
-# ---------------------------------------------------------------------------
-# Binance trading rules
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -114,11 +100,11 @@ class TradingRules:
     symbol: str
     min_qty: float = 0.0001
     max_qty: float = 9000.0
-    step_size: float = 0.0001  # LOT_SIZE filter
+    step_size: float = 0.0001
     min_price: float = 0.01
     max_price: float = 1_000_000.0
-    tick_size: float = 0.01  # PRICE_FILTER
-    min_notional: float = 5.0  # MIN_NOTIONAL filter
+    tick_size: float = 0.01
+    min_notional: float = 5.0
 
     def round_quantity(self, qty: float) -> float:
         """Floor qty to the nearest lot step — Binance rejects non-multiples."""
@@ -158,13 +144,8 @@ class TradingRules:
         return True, ""
 
 
-# ---------------------------------------------------------------------------
-# Live rule fetching
-# ---------------------------------------------------------------------------
-
 _rules_cache: dict[str, TradingRules] = {}
 
-# Hardcoded fallbacks so the bot works even without a live exchangeInfo call.
 _FALLBACK_RULES: dict[str, TradingRules] = {
     "ETH/USDC": TradingRules(
         symbol="ETH/USDC",
@@ -196,7 +177,6 @@ _FALLBACK_RULES: dict[str, TradingRules] = {
         tick_size=0.01,
         min_notional=5.0,
     ),
-    # ARB — Arbitrum governance token (~$0.50), Binance lot size 0.1 ARB
     "ARB/USDC": TradingRules(
         symbol="ARB/USDC",
         min_qty=0.1,
@@ -217,7 +197,6 @@ _FALLBACK_RULES: dict[str, TradingRules] = {
         tick_size=0.0001,
         min_notional=5.0,
     ),
-    # MAGIC — TreasureDAO gaming token (~$0.30), Arbitrum-native
     "MAGIC/USDT": TradingRules(
         symbol="MAGIC/USDT",
         min_qty=0.1,
@@ -228,7 +207,6 @@ _FALLBACK_RULES: dict[str, TradingRules] = {
         tick_size=0.0001,
         min_notional=5.0,
     ),
-    # PENDLE — yield trading protocol (~$3), Arbitrum-native
     "PENDLE/USDT": TradingRules(
         symbol="PENDLE/USDT",
         min_qty=0.1,
@@ -275,9 +253,8 @@ def _fetch_from_exchange(symbol: str, exchange_client) -> TradingRules:
     Parse Binance exchangeInfo filters into a TradingRules object.
     Calls ccxt's markets property which caches the exchange info.
     """
-    # ccxt loads markets lazily on first access
     markets = exchange_client._exchange.load_markets()
-    ccxt_symbol = symbol.replace("/", "")  # ETH/USDC → ETHUSDC for lookup
+    ccxt_symbol = symbol.replace("/", "")
     market = None
     for s, m in markets.items():
         if s == symbol or m.get("id") == ccxt_symbol:
@@ -290,8 +267,6 @@ def _fetch_from_exchange(symbol: str, exchange_client) -> TradingRules:
     limits = market.get("limits", {})
     precision = market.get("precision", {})
 
-    # ccxt precision can be either integer (decimal places) or float (tick size).
-    # If value < 1 it's already the tick size; otherwise it's decimal places.
     def _to_tick(val, default):
         v = float(val) if val is not None else default
         return v if 0 < v < 1 else 10 ** (-int(v))

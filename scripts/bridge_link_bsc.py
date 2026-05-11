@@ -11,8 +11,8 @@ Time: ~1 minute
 
 Usage:
     python scripts/bridge_link_bsc.py --to 0xBSC_ADDRESS --amount 5.0
-    python scripts/bridge_link_bsc.py --to 0xBSC_ADDRESS            # bridges all wallet LINK
-    python scripts/bridge_link_bsc.py --to 0xBSC_ADDRESS --dry-run  # quote only, no tx
+    python scripts/bridge_link_bsc.py --to 0xBSC_ADDRESS
+    python scripts/bridge_link_bsc.py --to 0xBSC_ADDRESS --dry-run
 """
 
 import argparse
@@ -32,12 +32,10 @@ PRIVATE_KEY = os.getenv("PRIVATE_KEY", "")
 LINK_ARB = Web3.to_checksum_address("0xf97f4df75117a78c1A5a0DBb814Af92458539FB4")
 USDT_ARB = Web3.to_checksum_address("0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9")
 
-# Synapse SynapseBridge on Arbitrum One
 SYNAPSE_BRIDGE = Web3.to_checksum_address("0x6f4e8eba4d337f874ab57478acc2cb5bacdc19c9")
 BSC_CHAIN_ID = 56
 CHAIN_ID_ARB = 42161
 
-# deposit(address to, uint256 chainId, address token, uint256 amount)
 DEPOSIT_SEL = Web3.keccak(text="deposit(address,uint256,address,uint256)")[:4].hex()
 
 
@@ -79,9 +77,9 @@ def main() -> None:
         return
 
     amount_wei = int(amount * 1e18)
-    eth_price = 2376.83  # rough ETH price for gas estimate
+    eth_price = 2376.83
     gas_price = w3.eth.gas_price
-    gas_est = 200_000  # typical Synapse bridge tx
+    gas_est = 200_000
     gas_usd = gas_est * gas_price / 1e18 * eth_price
 
     print(f"Wallet:  {wallet}")
@@ -94,7 +92,6 @@ def main() -> None:
         print("\nDRY RUN — no transaction sent.")
         return
 
-    # Step 1: Approve LINK for Synapse bridge
     current_allowance = get_link_allowance(w3, wallet, SYNAPSE_BRIDGE)
     if current_allowance < amount_wei:
         print("\nApproving LINK for Synapse bridge...")
@@ -128,7 +125,6 @@ def main() -> None:
             return
         print(f"Approved: {tx.hex()}")
 
-    # Step 2: Bridge via Synapse deposit()
     print("\nSending bridge transaction...")
     bridge_data = (
         "0x"
@@ -148,7 +144,6 @@ def main() -> None:
         "chainId": CHAIN_ID_ARB,
         "value": 0,
     }
-    # Estimate gas
     bridge_tx_dict["gas"] = int(w3.eth.estimate_gas({**bridge_tx_dict, "from": wallet}) * 1.2)
 
     signed = acct.sign_transaction(bridge_tx_dict)

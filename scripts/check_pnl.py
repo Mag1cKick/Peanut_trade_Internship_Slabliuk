@@ -6,7 +6,7 @@ prices everything in USDT, and shows net PnL vs starting capital.
 
 Usage:
     python scripts/check_pnl.py
-    python scripts/check_pnl.py --start 100   # override starting capital
+    python scripts/check_pnl.py --start 100
 """
 
 import argparse
@@ -65,25 +65,21 @@ def link_price(client_balances: dict) -> float:
         r = json.loads(urllib.request.urlopen(url, timeout=4).read())
         return float(r["price"])
     except Exception:
-        return 9.90  # fallback
+        return 9.90
 
 
 def main(start: float) -> None:
     print("Fetching balances...\n")
 
-    # Wallet
     w_usdt = wallet_balance("USDT")
     w_link = wallet_balance("LINK")
 
-    # Binance
     bals = binance_balances()
     b_usdt = float(bals.get("USDT", {}).get("free", 0))
     b_link = float(bals.get("LINK", {}).get("free", 0))
 
-    # Price
     price = link_price(bals)
 
-    # Values
     w_link_usd = w_link * price
     b_link_usd = b_link * price
     total_usd = w_usdt + w_link_usd + b_usdt + b_link_usd

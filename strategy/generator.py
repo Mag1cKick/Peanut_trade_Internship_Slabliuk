@@ -219,7 +219,6 @@ class SignalGenerator:
                 raise ValueError(f"No pool found for {pair}")
             return result
 
-        # Legacy PricingEngine path (Week 2)
         base, quote = pair.split("/")
         token_in = self._get_token(base)
         token_out = self._get_token(quote)

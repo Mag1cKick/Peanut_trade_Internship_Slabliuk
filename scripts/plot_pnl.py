@@ -7,7 +7,7 @@ Parses TRADE | log lines to extract actual net PnL, then plots:
   3. Per-trade PnL bar chart
 
 Usage:
-    python scripts/plot_pnl.py                      # all logs in logs/
+    python scripts/plot_pnl.py
     python scripts/plot_pnl.py logs/bot_20260601.log
 """
 
@@ -73,10 +73,8 @@ def plot(trades: list[dict], title: str = "PnL Analysis") -> None:
         print("No timestamped trades found.")
         return
 
-    # Cumulative PnL
     cum_pnl = [sum(pnls[: i + 1]) for i in range(len(pnls))]
 
-    # Drawdown
     peak = cum_pnl[0]
     drawdowns = []
     for val in cum_pnl:
@@ -87,7 +85,6 @@ def plot(trades: list[dict], title: str = "PnL Analysis") -> None:
     fig, axes = plt.subplots(3, 1, figsize=(12, 10))
     fig.suptitle(title, fontsize=14, fontweight="bold")
 
-    # 1. Cumulative PnL
     ax1 = axes[0]
     color = "green" if cum_pnl[-1] >= 0 else "red"
     ax1.plot(timestamps, cum_pnl, color=color, linewidth=2)
@@ -101,7 +98,6 @@ def plot(trades: list[dict], title: str = "PnL Analysis") -> None:
     ax1.xaxis.set_major_formatter(mdates.DateFormatter("%m/%d %H:%M"))
     ax1.grid(True, alpha=0.3)
 
-    # 2. Drawdown
     ax2 = axes[1]
     ax2.fill_between(timestamps, drawdowns, 0, color="red", alpha=0.4)
     ax2.plot(timestamps, drawdowns, color="darkred", linewidth=1)
@@ -110,7 +106,6 @@ def plot(trades: list[dict], title: str = "PnL Analysis") -> None:
     ax2.xaxis.set_major_formatter(mdates.DateFormatter("%m/%d %H:%M"))
     ax2.grid(True, alpha=0.3)
 
-    # 3. Per-trade PnL bars
     ax3 = axes[2]
     colors = ["green" if p >= 0 else "red" for p in pnls]
     ax3.bar(range(len(pnls)), pnls, color=colors, alpha=0.7)
@@ -127,7 +122,6 @@ def plot(trades: list[dict], title: str = "PnL Analysis") -> None:
     print(f"Chart saved to {out}")
     plt.show()
 
-    # Print summary
     print(
         f"\nSummary: {len(pnls)} trades  |  "
         f"Net PnL: ${cum_pnl[-1]:+.2f}  |  "
@@ -137,7 +131,6 @@ def plot(trades: list[dict], title: str = "PnL Analysis") -> None:
 
 
 if __name__ == "__main__":
-    # Prefer SQLite DB (authoritative, correct PnL) over log parsing
     try:
         from db.trades import all_trades as _db_trades
 
@@ -158,7 +151,6 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"DB read failed ({e}), falling back to logs")
 
-    # Fallback: parse only Week 6 day-named logs to avoid old test data
     if len(sys.argv) > 1:
         paths = [Path(p) for p in sys.argv[1:]]
     else:

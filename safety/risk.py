@@ -49,12 +49,7 @@ class RiskManager:
         self._daily_reset: float = self._next_midnight()
 
         self._consecutive_losses: int = 0
-        # Rolling deque of trade timestamps for trades-per-hour accounting
         self._trade_times: deque[float] = deque()
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
 
     def check_pre_trade(self, signal) -> tuple[bool, str]:
         """
@@ -88,7 +83,6 @@ class RiskManager:
                 f">= limit {self.limits.max_trades_per_hour}"
             )
 
-        # Trade value: use size × CEX price as the reference notional
         trade_usd = float(signal.size) * float(signal.cex_price)
         if trade_usd > self.limits.max_trade_usd:
             return False, (
@@ -142,10 +136,6 @@ class RiskManager:
         self._prune_trade_times()
         return len(self._trade_times)
 
-    # ------------------------------------------------------------------
-    # Internals
-    # ------------------------------------------------------------------
-
     def _maybe_reset_daily(self) -> None:
         now = time.time()
         if now >= self._daily_reset:
@@ -174,11 +164,6 @@ class PreTradeValidator:
     inventory check already failed, or no spread to trade on.
     """
 
-    # Spread above this is almost certainly a price calculation error.
-    # 500 bps suits efficient pairs (ETH/USDC). Forgotten/stale pools on
-    # low-competition tokens legitimately show thousands of bps — the real
-    # ceiling is the point where the number is physically impossible (e.g.
-    # token would have to be priced at zero or infinity).
     MAX_SANE_SPREAD_BPS: float = 500.0
 
     def validate_signal(self, signal) -> tuple[bool, str]:

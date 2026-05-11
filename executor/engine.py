@@ -23,8 +23,6 @@ from strategy.signal import Direction, Signal
 
 log = logging.getLogger(__name__)
 
-# Errors from the CEX that indicate a permanent business-logic failure.
-# These are never retried — the order was understood and rejected.
 _PERMANENT_CEX_ERRORS = frozenset(
     {
         "insufficient",
@@ -81,18 +79,15 @@ class ExecutorConfig:
     use_flashbots: bool = True
     simulation_mode: bool = True
     fee_structure: FeeStructure | None = None
-    # Retry (Microsoft Retry Pattern): exponential backoff for transient CEX failures.
-    # Permanent failures (rejected, insufficient balance) are never retried.
     leg1_max_retries: int = 2
     leg1_retry_base_delay: float = 0.05  # 50ms → 100ms → 200ms with jitter
-    # DEX execution parameters
-    wallet: object = None  # WalletManager
-    chain_client: object = None  # ChainClient
+    wallet: object = None
+    chain_client: object = None
     slippage_bps: int = 50
     unwind_slippage_bps: int = 150
     dex_router: str = "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D"
     tx_deadline_seconds: int = 120
-    chain_id: int = 42161  # Arbitrum One
+    chain_id: int = 42161
 
 
 class Executor:
@@ -283,7 +278,6 @@ class Executor:
                     return result, ""
 
                 error = result.get("error", "CEX rejected")
-                # Permanent failure — stop immediately
                 if any(p in error.lower() for p in _PERMANENT_CEX_ERRORS):
                     log.warning("CEX permanent failure (no retry): %s", error)
                     return None, error
@@ -341,9 +335,6 @@ class Executor:
                 "filled": actual_size,
             }
 
-        # Apply Binance trading rules: round qty/price and validate filters
-        # before submitting — Binance rejects orders that violate LOT_SIZE,
-        # PRICE_FILTER, or MIN_NOTIONAL without this pre-processing.
         try:
             from config.settings import get_trading_rules
 
@@ -382,8 +373,6 @@ class Executor:
             log.debug("Order book refresh failed, using signal price: %s", exc)
 
         # clientOrderId provides idempotency: if this request is retried after a
-        # timeout, the exchange recognises the duplicate and returns the original
-        # result instead of creating a second order.
         params = {"clientOrderId": order_id} if order_id else {}
         result = self.exchange.create_limit_ioc_order(
             symbol=signal.pair,
@@ -440,8 +429,6 @@ class Executor:
             token_in = self.pricing.get_token(quote)
             token_out = self.pricing.get_token(base)
 
-        # For BUY_DEX_SELL_CEX: size is MAGIC (base/token_out), token_in is USDT.
-        # Convert using signal.dex_price (USDT per MAGIC) to get the correct USDT spend amount.
         if signal.direction == Direction.BUY_DEX_SELL_CEX:
             amount_in = int(size * signal.dex_price * 10**token_in.decimals)
         else:
@@ -462,7 +449,6 @@ class Executor:
 
         log.info("DEX quote: expected_output=%s", quote_result.expected_output)
 
-        # PricingEngine quotes carry a validity flag; DirectQuote does not.
         if hasattr(quote_result, "is_valid") and not quote_result.is_valid:
             return {"success": False, "error": "Quote invalid (stale reserves)"}
 
@@ -470,7 +456,6 @@ class Executor:
         deadline = int(time.time()) + self.config.tx_deadline_seconds
         router = Address(self.config.dex_router)
 
-        # Detect V3 pricer to pick correct calldata format.
         is_v3 = hasattr(self.pricing, "_resolve_pool")
         fee_tier = 500
         if is_v3:
@@ -620,8 +605,6 @@ class Executor:
         if not receipt or not receipt.status:
             return {"success": False, "error": "DEX tx reverted"}
 
-        # For SELL direction: token_out=quote → price = quote_out / base_in
-        # For BUY  direction: token_out=base  → price = quote_in / base_out (USDT spent per LINK received)
         if signal.direction == Direction.BUY_DEX_SELL_CEX:
             effective_price = (amount_in / 10**token_in.decimals) / (
                 quote_result.expected_output / 10**token_out.decimals
@@ -731,14 +714,12 @@ class Executor:
         base, quote = signal.pair.split("/")
 
         if signal.direction == Direction.BUY_CEX_SELL_DEX:
-            # Original: sold base → received quote. Unwind: sell quote → get base.
             token_in = self.pricing.get_token(quote)
             token_out = self.pricing.get_token(base)
             amount_in = int(
                 (ctx.leg1_fill_size or 0) * (ctx.leg1_fill_price or 0) * 10**token_in.decimals
             )
         else:
-            # Original: sold quote → received base. Unwind: sell base → get quote.
             token_in = self.pricing.get_token(base)
             token_out = self.pricing.get_token(quote)
             amount_in = int((ctx.leg1_fill_size or 0) * 10**token_in.decimals)
@@ -747,7 +728,6 @@ class Executor:
             log.warning("DEX unwind: zero amount — nothing to unwind")
             return
 
-        # Cap to actual wallet balance — leg1_fill_size is rounded and may exceed
         # the exact wei received, causing STF on the unwind swap.
         try:
             padded_w = wallet.address.lower().replace("0x", "").zfill(64)
@@ -839,7 +819,6 @@ class Executor:
             )
             tx_value = TokenAmount(raw=0, decimals=18, symbol="ETH")
 
-        # Unwind is time-critical — use "high" gas to ensure next-block inclusion.
         tx = (
             TransactionBuilder(chain_client, wallet)
             .to(router)
@@ -916,7 +895,6 @@ class Executor:
                 )
 
     def _calculate_pnl(self, ctx: ExecutionContext) -> float:
-        # Resolve which fill is CEX and which is DEX based on execution venue.
         if ctx.leg1_venue == "cex":
             cex_price = ctx.leg1_fill_price
             dex_price = ctx.leg2_fill_price

@@ -26,10 +26,6 @@ import json
 import urllib.request
 from dataclasses import dataclass, field
 
-# ---------------------------------------------------------------------------
-# Token and quote descriptors
-# ---------------------------------------------------------------------------
-
 
 @dataclass
 class DirectToken:
@@ -37,7 +33,7 @@ class DirectToken:
 
     symbol: str
     decimals: int
-    address: str = ""  # checksummed ERC-20 address; empty = native gas token
+    address: str = ""
 
 
 @dataclass
@@ -45,11 +41,6 @@ class DirectQuote:
     """Minimal quote descriptor compatible with SignalGenerator._dex_prices_from_engine()."""
 
     expected_output: int
-
-
-# ---------------------------------------------------------------------------
-# Network configuration
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -61,17 +52,11 @@ class NetworkConfig:
 
     name: str
     chain_id: int
-    router: str  # Uniswap V2 Router address
-    factory: str  # Uniswap V2 Factory address (for getPair discovery)
+    router: str
+    factory: str
     tokens: dict[str, DirectToken] = field(default_factory=dict)
-    # Pre-seeded pool addresses: (base, quote) → pair address
-    # Leave empty to let the pricer discover pools via factory.getPair()
     pools: dict[tuple[str, str], str] = field(default_factory=dict)
 
-
-# ---------------------------------------------------------------------------
-# Pre-built network configs
-# ---------------------------------------------------------------------------
 
 ETHEREUM = NetworkConfig(
     name="ethereum",
@@ -79,16 +64,14 @@ ETHEREUM = NetworkConfig(
     router="0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D",
     factory="0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f",
     tokens={
-        "ETH": DirectToken("ETH", 18, "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"),  # WETH
+        "ETH": DirectToken("ETH", 18, "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"),
         "USDT": DirectToken("USDT", 6, "0xdAC17F958D2ee523a2206206994597C13D831ec7"),
         "USDC": DirectToken("USDC", 6, "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"),
         "WBTC": DirectToken("WBTC", 8, "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599"),
         "DAI": DirectToken("DAI", 18, "0x6B175474E89094C44Da98b954EedeAC495271d0F"),
     },
     pools={
-        # WETH(0xC02) / USDT(0xdAC) — WETH < USDT → WETH=token0
         ("ETH", "USDT"): "0x0d4a11d5EEaaC28EC3F61d100daF4d40471f1852",
-        # USDC(0xA0b) / WETH(0xC02) — USDC < WETH → USDC=token0
         ("ETH", "USDC"): "0xB4e16d0168e52d35CaCD2c6185b44281Ec28C9Dc",
     },
 )
@@ -99,8 +82,8 @@ ARBITRUM = NetworkConfig(
     router="0x4752ba5dbc23f44d87826276bf6fd6b1c372ad24",
     factory="0xf1D7CC64Fb4452F05c498126312eBE29f30Fbcf9",
     tokens={
-        "ETH": DirectToken("ETH", 18, "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"),  # WETH
-        "USDC": DirectToken("USDC", 6, "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"),  # native USDC
+        "ETH": DirectToken("ETH", 18, "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"),
+        "USDC": DirectToken("USDC", 6, "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"),
         "USDT": DirectToken("USDT", 6, "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9"),
         "WBTC": DirectToken("WBTC", 8, "0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f"),
         "DAI": DirectToken("DAI", 18, "0xDA10009cBd5D07dd0CeCc66161FC93D7c9000da1"),
@@ -109,11 +92,9 @@ ARBITRUM = NetworkConfig(
         "MAGIC": DirectToken("MAGIC", 18, "0x539bdE0d7Dbd336b79148AA742883198BBF60342"),
         "PENDLE": DirectToken("PENDLE", 18, "0x0c880f6761F1af8d9Aa9C466984b80DAb9a8c9e8"),
     },
-    # Pools are discovered via factory.getPair() at runtime — no hardcoding needed.
     pools={},
 )
 
-# SushiSwap on Arbitrum — same ABI as Uniswap V2, more liquidity for some pairs
 ARBITRUM_SUSHI = NetworkConfig(
     name="arbitrum-sushi",
     chain_id=42161,
@@ -124,11 +105,6 @@ ARBITRUM_SUSHI = NetworkConfig(
 )
 
 
-# ---------------------------------------------------------------------------
-# Pricer
-# ---------------------------------------------------------------------------
-
-
 class UniswapDirectPricer:
     """
     Drop-in pricing_module for SignalGenerator backed by live Uniswap V2
@@ -136,10 +112,8 @@ class UniswapDirectPricer:
     Pool addresses are discovered at runtime via factory.getPair() and cached.
 
     Usage:
-        # Arbitrum (default for Week 5 — gas costs pennies)
         pricer = UniswapDirectPricer(rpc_url, network=ARBITRUM)
 
-        # Ethereum mainnet (price data only — swaps cost $5-15)
         pricer = UniswapDirectPricer(rpc_url, network=ETHEREUM)
     """
 
@@ -150,18 +124,12 @@ class UniswapDirectPricer:
     ) -> None:
         self.rpc_url = rpc_url
         self.network = network or ARBITRUM
-        # Runtime pool cache: populated lazily via factory.getPair()
         self._pool_cache: dict[tuple[str, str], str] = dict(self.network.pools)
-        # token0 address cache per pool (to resolve reserve ordering)
         self._token0_cache: dict[str, str] = {}
 
     @property
     def router(self) -> str:
         return self.network.router
-
-    # ------------------------------------------------------------------
-    # SignalGenerator interface
-    # ------------------------------------------------------------------
 
     def get_token(self, symbol: str) -> DirectToken:
         if symbol not in self.network.tokens:
@@ -188,10 +156,6 @@ class UniswapDirectPricer:
         amount_out = (reserve_out * amount_in * 997) // (reserve_in * 1000 + amount_in * 997)
         return DirectQuote(expected_output=amount_out)
 
-    # ------------------------------------------------------------------
-    # Extra helper used by the demo and executor
-    # ------------------------------------------------------------------
-
     def get_prices_for_pair(self, pair: str, size: float) -> tuple[float, float]:
         """
         Return (dex_buy, dex_sell) in quote-currency-per-base-token units.
@@ -209,11 +173,9 @@ class UniswapDirectPricer:
 
         size_raw = int(size * 10**token_base.decimals)
 
-        # Sell base → receive quote
         out_raw = (reserve_quote * size_raw * 997) // (reserve_base * 1000 + size_raw * 997)
         dex_sell = out_raw / (10**token_quote.decimals * size)
 
-        # Buy base ← pay quote  (AMM getAmountIn)
         num = reserve_quote * size_raw * 1000
         den = (reserve_base - size_raw) * 997
         if den <= 0:
@@ -223,10 +185,6 @@ class UniswapDirectPricer:
             dex_buy = in_raw / (10**token_quote.decimals * size)
 
         return dex_buy, dex_sell
-
-    # ------------------------------------------------------------------
-    # Pool discovery
-    # ------------------------------------------------------------------
 
     def _resolve_pool(self, base: str, quote: str) -> str:
         """
@@ -248,7 +206,7 @@ class UniswapDirectPricer:
             )
 
         self._pool_cache[key] = addr
-        self._pool_cache[(quote, base)] = addr  # also cache reverse direction
+        self._pool_cache[(quote, base)] = addr
         return addr
 
     def _get_pair_from_factory(self, token_a: str, token_b: str) -> str:
@@ -262,7 +220,6 @@ class UniswapDirectPricer:
 
         data = "0xe6a43905" + _pad(token_a) + _pad(token_b)
         result = self._eth_call(self.network.factory, data)
-        # Result is ABI-encoded address: 32 bytes, last 20 bytes are the address
         addr = "0x" + result[-40:]
         return addr
 
@@ -295,10 +252,6 @@ class UniswapDirectPricer:
         self._token0_cache[pool_addr] = addr
         return addr
 
-    # ------------------------------------------------------------------
-    # RPC helpers
-    # ------------------------------------------------------------------
-
     def _get_reserves(self, pool_addr: str) -> tuple[int, int]:
         """Call getReserves() → (reserve0, reserve1)."""
         data = self._eth_call(pool_addr, "0x0902f1ac")
@@ -328,20 +281,15 @@ class UniswapDirectPricer:
             result = json.loads(resp.read())
         if "error" in result or not result.get("result"):
             raise ValueError(f"eth_call to {to} failed: {result.get('error', 'empty result')}")
-        return result["result"][2:]  # strip 0x
+        return result["result"][2:]
 
 
-# ---------------------------------------------------------------------------
-# Uniswap V3 network config + pricer
-# ---------------------------------------------------------------------------
-
-# Uniswap V3 on Arbitrum One — same factory on all chains Uniswap V3 deployed to
 ARBITRUM_V3 = NetworkConfig(
     name="arbitrum-v3",
     chain_id=42161,
-    router="0xE592427A0AEce92De3Edee1F18E0157C05861564",  # V3 SwapRouter
-    factory="0x1F98431c8aD98523631AE4a59f267346ea31F984",  # V3 Factory (universal)
-    tokens=ARBITRUM.tokens,  # same token addresses as V2
+    router="0xE592427A0AEce92De3Edee1F18E0157C05861564",
+    factory="0x1F98431c8aD98523631AE4a59f267346ea31F984",
+    tokens=ARBITRUM.tokens,
     pools={},
 )
 
@@ -361,7 +309,6 @@ class UniswapV3Pricer:
         generator = SignalGenerator(..., pricing_module=pricer, ...)
     """
 
-    # Fee tiers to probe, lowest first (most liquid for major pairs)
     _FEE_TIERS = (500, 3000, 10000)
 
     def __init__(self, rpc_url: str, network: NetworkConfig | None = None) -> None:
@@ -373,10 +320,6 @@ class UniswapV3Pricer:
     @property
     def router(self) -> str:
         return self.network.router
-
-    # ------------------------------------------------------------------
-    # SignalGenerator interface (same as V2 pricer)
-    # ------------------------------------------------------------------
 
     def get_token(self, symbol: str) -> DirectToken:
         if symbol not in self.network.tokens:
@@ -423,7 +366,6 @@ class UniswapV3Pricer:
         if slot0 is None or slot0 <= 0:
             return None
 
-        # Quoter depth check — uses web3.py to avoid raw-HTTP response format issues
         base_wei = int(size * 10**base_tok.decimals)
         quoter_sell = self._quoter_sell_web3(
             base_tok.address,
@@ -437,7 +379,6 @@ class UniswapV3Pricer:
         if quoter_sell is not None and quoter_sell > 0:
             deviation = abs(quoter_sell - slot0) / slot0
             if deviation > self._GHOST_POOL_THRESHOLD:
-                # Stale price but no real depth — reject this pool
                 return None
             dex_sell_price = quoter_sell
             dex_buy_price = quoter_sell * (1 + 2 * fee)
@@ -480,16 +421,11 @@ class UniswapV3Pricer:
         except Exception:
             return None
 
-    # ------------------------------------------------------------------
-    # Pool discovery
-    # ------------------------------------------------------------------
-
     def _resolve_pool(self, base: str, quote: str) -> tuple[str | None, int]:
         """Return (pool_address, fee_tier) trying tiers in order, or (None, 0)."""
         key = (base, quote)
         if key in self._pool_cache:
             addr = self._pool_cache[key]
-            # fee tier stored alongside — encode in cache value as addr:fee
             parts = addr.split(":")
             return parts[0], int(parts[1])
 
@@ -530,9 +466,7 @@ class UniswapV3Pricer:
         except Exception:
             return None
 
-    # ------------------------------------------------------------------
     # Price from slot0
-    # ------------------------------------------------------------------
 
     def _price_from_slot0(self, pool: str, base: str, quote: str) -> float | None:
         """
@@ -551,7 +485,6 @@ class UniswapV3Pricer:
         if sqrt_price_x96 == 0:
             return None
 
-        # price_raw = token1_wei / token0_wei
         price_raw = (sqrt_price_x96 / (2**96)) ** 2
 
         base_tok = self.network.tokens[base]
@@ -559,10 +492,8 @@ class UniswapV3Pricer:
         token0 = self._get_token0(pool)
 
         if token0 and token0.lower() == base_tok.address.lower():
-            # base is token0 → price_raw = quote_wei/base_wei
             return price_raw * (10**base_tok.decimals) / (10**quote_tok.decimals)
         else:
-            # base is token1 → price_raw = base_wei/quote_wei → invert
             if price_raw == 0:
                 return None
             return (1.0 / price_raw) * (10**base_tok.decimals) / (10**quote_tok.decimals)
@@ -577,10 +508,6 @@ class UniswapV3Pricer:
             return addr
         except Exception:
             return None
-
-    # ------------------------------------------------------------------
-    # RPC (same pattern as V2 pricer)
-    # ------------------------------------------------------------------
 
     def _eth_call(self, to: str, data: str) -> str:
         payload = {
