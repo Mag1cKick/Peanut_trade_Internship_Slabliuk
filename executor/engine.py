@@ -92,6 +92,7 @@ class ExecutorConfig:
     unwind_slippage_bps: int = 150
     dex_router: str = "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D"
     tx_deadline_seconds: int = 120
+    chain_id: int = 42161  # Arbitrum One
 
 
 class Executor:
@@ -221,7 +222,8 @@ class Executor:
 
         if not leg1["success"]:
             ctx.state = ExecutorState.FAILED
-            ctx.error = "DEX failed (no cost via Flashbots)"
+            ctx.error = leg1.get("error", "DEX failed (Flashbots-first)")
+            log.error("DEX leg failed: %s", ctx.error)
             return ctx
 
         ctx.leg1_fill_price = leg1["price"]
@@ -355,6 +357,30 @@ class Executor:
             price_for_order = signal.cex_price * 1.001
 
         side = "buy" if signal.direction == Direction.BUY_CEX_SELL_DEX else "sell"
+
+        # Re-fetch current order book so the IOC price is fresh, not stale from
+        # signal time. The DEX leg takes 4-8s — the spread can vanish in that time.
+        try:
+            ob = self.exchange.fetch_order_book(signal.pair)
+            if side == "sell":
+                current_best = float(ob["best_bid"][0]) if ob.get("best_bid") else None
+                if current_best:
+                    fresh = current_best * 0.9995
+                    try:
+                        price_for_order = rules.round_price(fresh)
+                    except Exception:
+                        price_for_order = fresh
+            else:
+                current_best = float(ob["best_ask"][0]) if ob.get("best_ask") else None
+                if current_best:
+                    fresh = current_best * 1.0005
+                    try:
+                        price_for_order = rules.round_price(fresh)
+                    except Exception:
+                        price_for_order = fresh
+        except Exception as exc:
+            log.debug("Order book refresh failed, using signal price: %s", exc)
+
         # clientOrderId provides idempotency: if this request is retried after a
         # timeout, the exchange recognises the duplicate and returns the original
         # result instead of creating a second order.
@@ -414,12 +440,27 @@ class Executor:
             token_in = self.pricing.get_token(quote)
             token_out = self.pricing.get_token(base)
 
-        amount_in = int(size * 10**token_in.decimals)
+        # For BUY_DEX_SELL_CEX: size is MAGIC (base/token_out), token_in is USDT.
+        # Convert using signal.dex_price (USDT per MAGIC) to get the correct USDT spend amount.
+        if signal.direction == Direction.BUY_DEX_SELL_CEX:
+            amount_in = int(size * signal.dex_price * 10**token_in.decimals)
+        else:
+            amount_in = int(size * 10**token_in.decimals)
+
+        log.info(
+            "DEX leg: token_in=%s amount_in=%d token_out=%s",
+            token_in.symbol,
+            amount_in,
+            token_out.symbol,
+        )
 
         try:
             quote_result = self.pricing.get_quote(token_in, token_out, amount_in)
         except Exception as exc:
+            log.error("DEX quote failed: %s", exc)
             return {"success": False, "error": f"Quote failed: {exc}"}
+
+        log.info("DEX quote: expected_output=%s", quote_result.expected_output)
 
         # PricingEngine quotes carry a validity flag; DirectQuote does not.
         if hasattr(quote_result, "is_valid") and not quote_result.is_valid:
@@ -429,68 +470,164 @@ class Executor:
         deadline = int(time.time()) + self.config.tx_deadline_seconds
         router = Address(self.config.dex_router)
 
-        # Build token path — use route from PricingEngine if available, else direct.
-        if hasattr(quote_result, "route"):
-            path = [t.address.checksum for t in quote_result.route.path]
-        else:
-            path = [token_in.address, token_out.address]
+        # Detect V3 pricer to pick correct calldata format.
+        is_v3 = hasattr(self.pricing, "_resolve_pool")
+        fee_tier = 500
+        if is_v3:
+            _, ft = self.pricing._resolve_pool(token_in.symbol, token_out.symbol)
+            if ft == 0:
+                _, ft = self.pricing._resolve_pool(token_out.symbol, token_in.symbol)
+            if ft:
+                fee_tier = ft
 
         token_in_is_eth = token_in.symbol == "ETH"
         token_out_is_eth = token_out.symbol == "ETH"
 
         if token_in_is_eth:
-            # swapExactETHForTokens — no approval, ETH sent as msg.value
-            calldata = bytes.fromhex("7ff36ab5") + abi_encode(
-                ["uint256", "address[]", "address", "uint256"],
-                [min_out, path, wallet.address, deadline],
-            )
+            if is_v3:
+                # V3 exactInputSingle ETH→token (value = amount_in ETH)
+                calldata = bytes.fromhex("414bf389") + abi_encode(
+                    [
+                        "address",
+                        "address",
+                        "uint24",
+                        "address",
+                        "uint256",
+                        "uint256",
+                        "uint256",
+                        "uint160",
+                    ],
+                    [
+                        token_in.address,
+                        token_out.address,
+                        fee_tier,
+                        wallet.address,
+                        deadline,
+                        amount_in,
+                        min_out,
+                        0,
+                    ],
+                )
+            else:
+                calldata = bytes.fromhex("7ff36ab5") + abi_encode(
+                    ["uint256", "address[]", "address", "uint256"],
+                    [min_out, [token_in.address, token_out.address], wallet.address, deadline],
+                )
             tx_value = TokenAmount(raw=amount_in, decimals=18, symbol="ETH")
 
         elif token_out_is_eth:
-            # swapExactTokensForETH — approve token_in first
             self._ensure_erc20_approved_sync(
                 token_in.address, wallet, self.config.dex_router, chain_client, amount_in
             )
-            calldata = bytes.fromhex("18cbafe5") + abi_encode(
-                ["uint256", "uint256", "address[]", "address", "uint256"],
-                [amount_in, min_out, path, wallet.address, deadline],
-            )
+            if is_v3:
+                calldata = bytes.fromhex("414bf389") + abi_encode(
+                    [
+                        "address",
+                        "address",
+                        "uint24",
+                        "address",
+                        "uint256",
+                        "uint256",
+                        "uint256",
+                        "uint160",
+                    ],
+                    [
+                        token_in.address,
+                        token_out.address,
+                        fee_tier,
+                        wallet.address,
+                        deadline,
+                        amount_in,
+                        min_out,
+                        0,
+                    ],
+                )
+            else:
+                calldata = bytes.fromhex("18cbafe5") + abi_encode(
+                    ["uint256", "uint256", "address[]", "address", "uint256"],
+                    [
+                        amount_in,
+                        min_out,
+                        [token_in.address, token_out.address],
+                        wallet.address,
+                        deadline,
+                    ],
+                )
             tx_value = TokenAmount(raw=0, decimals=18, symbol="ETH")
 
         else:
-            # swapExactTokensForTokens — approve token_in first
             self._ensure_erc20_approved_sync(
                 token_in.address, wallet, self.config.dex_router, chain_client, amount_in
             )
-            calldata = bytes.fromhex("38ed1739") + abi_encode(
-                ["uint256", "uint256", "address[]", "address", "uint256"],
-                [amount_in, min_out, path, wallet.address, deadline],
-            )
+            if is_v3:
+                # V3 exactInputSingle — single-pool token→token swap
+                calldata = bytes.fromhex("414bf389") + abi_encode(
+                    [
+                        "address",
+                        "address",
+                        "uint24",
+                        "address",
+                        "uint256",
+                        "uint256",
+                        "uint256",
+                        "uint160",
+                    ],
+                    [
+                        token_in.address,
+                        token_out.address,
+                        fee_tier,
+                        wallet.address,
+                        deadline,
+                        amount_in,
+                        min_out,
+                        0,
+                    ],
+                )
+            else:
+                calldata = bytes.fromhex("38ed1739") + abi_encode(
+                    ["uint256", "uint256", "address[]", "address", "uint256"],
+                    [
+                        amount_in,
+                        min_out,
+                        [token_in.address, token_out.address],
+                        wallet.address,
+                        deadline,
+                    ],
+                )
             tx_value = TokenAmount(raw=0, decimals=18, symbol="ETH")
 
         try:
-            # with_gas_price("high") sets EIP-1559 maxFeePerGas/maxPriorityFeePerGas
-            # from ChainClient.get_gas_price() — arb txs must land in the next block.
-            # with_gas_estimate() adds a 1.2× safety buffer on the gas limit.
             tx = (
                 TransactionBuilder(chain_client, wallet)
                 .to(router)
                 .value(tx_value)
                 .data(calldata)
+                .chain_id(self.config.chain_id)
                 .with_gas_estimate(buffer=1.2)
                 .with_gas_price("high")
                 .build()
             )
             signed = wallet.sign_transaction(tx.to_dict())
-            tx_hash = chain_client.send_transaction(signed.rawTransaction)
+            tx_hash = chain_client.send_transaction(
+                signed.raw_transaction
+                if hasattr(signed, "raw_transaction")
+                else signed.rawTransaction
+            )
             receipt = chain_client.wait_for_receipt(tx_hash, timeout=self.config.leg2_timeout)
         except Exception as exc:
             return {"success": False, "error": f"DEX tx failed: {exc}"}
 
-        if not receipt or receipt.get("status") != 1:
+        if not receipt or not receipt.status:
             return {"success": False, "error": "DEX tx reverted"}
 
-        effective_price = (quote_result.expected_output / 10**token_out.decimals) / size
+        # For SELL direction: token_out=quote → price = quote_out / base_in
+        # For BUY  direction: token_out=base  → price = quote_in / base_out (USDT spent per LINK received)
+        if signal.direction == Direction.BUY_DEX_SELL_CEX:
+            effective_price = (amount_in / 10**token_in.decimals) / (
+                quote_result.expected_output / 10**token_out.decimals
+            )
+        else:
+            effective_price = (quote_result.expected_output / 10**token_out.decimals) / size
         return {"success": True, "price": effective_price, "filled": size, "tx_hash": tx_hash}
 
     def _ensure_erc20_approved_sync(
@@ -522,7 +659,14 @@ class Executor:
             {"to": token_address, "data": "0xdd62ed3e" + owner + spender_hex},
             "latest",
         )
-        current = int(result, 16) if result and result not in ("0x", "0x0") else 0
+        if not result:
+            current = 0
+        elif isinstance(result, bytes | bytearray):
+            current = int.from_bytes(result, "big")
+        elif result in ("0x", "0x0"):
+            current = 0
+        else:
+            current = int(result, 16)
 
         if current >= amount_needed:
             return
@@ -545,12 +689,19 @@ class Executor:
                 .to(Address(token_address))
                 .value(TokenAmount(raw=0, decimals=18, symbol="ETH"))
                 .data(calldata)
+                .chain_id(self.config.chain_id)
+                .with_gas_estimate(buffer=1.2)
+                .with_gas_price("high")
                 .build()
             )
             signed = wallet.sign_transaction(tx.to_dict())
-            tx_hash = chain_client.send_transaction(signed.rawTransaction)
+            tx_hash = chain_client.send_transaction(
+                signed.raw_transaction
+                if hasattr(signed, "raw_transaction")
+                else signed.rawTransaction
+            )
             receipt = chain_client.wait_for_receipt(tx_hash, timeout=30)
-            if not receipt or receipt.get("status") != 1:
+            if not receipt or not receipt.status:
                 raise RuntimeError(f"Approval tx reverted for {token_address}")
             log.info("ERC-20 approval confirmed: %s", tx_hash)
         except Exception as exc:
@@ -596,6 +747,29 @@ class Executor:
             log.warning("DEX unwind: zero amount — nothing to unwind")
             return
 
+        # Cap to actual wallet balance — leg1_fill_size is rounded and may exceed
+        # the exact wei received, causing STF on the unwind swap.
+        try:
+            padded_w = wallet.address.lower().replace("0x", "").zfill(64)
+            raw_bal = chain_client._call_with_retry(
+                "call",
+                {"to": token_in.address, "data": "0x70a08231" + padded_w},
+                "latest",
+            )
+            if raw_bal and raw_bal not in ("0x", "0x0"):
+                actual_bal = (
+                    int(raw_bal, 16)
+                    if isinstance(raw_bal, str)
+                    else int.from_bytes(raw_bal[:32], "big")
+                )
+                if actual_bal < amount_in:
+                    log.info(
+                        "Unwind: capping amount_in %d → %d (actual balance)", amount_in, actual_bal
+                    )
+                    amount_in = actual_bal
+        except Exception:
+            pass
+
         try:
             quote_result = self.pricing.get_quote(token_in, token_out, amount_in)
         except Exception as exc:
@@ -633,9 +807,35 @@ class Executor:
             self._ensure_erc20_approved_sync(
                 token_in.address, wallet, self.config.dex_router, chain_client, amount_in
             )
-            calldata = bytes.fromhex("38ed1739") + abi_encode(
-                ["uint256", "uint256", "address[]", "address", "uint256"],
-                [amount_in, min_out, path, wallet.address, deadline],
+            # Use V3 exactInputSingle — V2 swapExactTokensForTokens reverts on V3 router
+            fee_tier = 3000
+            if hasattr(self.pricing, "_resolve_pool"):
+                try:
+                    _, fee_tier = self.pricing._resolve_pool(token_in.symbol, token_out.symbol)
+                    fee_tier = fee_tier or 3000
+                except Exception:
+                    pass
+            calldata = bytes.fromhex("414bf389") + abi_encode(
+                [
+                    "address",
+                    "address",
+                    "uint24",
+                    "address",
+                    "uint256",
+                    "uint256",
+                    "uint256",
+                    "uint160",
+                ],
+                [
+                    token_in.address,
+                    token_out.address,
+                    fee_tier,
+                    wallet.address,
+                    deadline,
+                    amount_in,
+                    min_out,
+                    0,
+                ],
             )
             tx_value = TokenAmount(raw=0, decimals=18, symbol="ETH")
 
@@ -645,15 +845,18 @@ class Executor:
             .to(router)
             .value(tx_value)
             .data(calldata)
+            .chain_id(self.config.chain_id)
             .with_gas_estimate(buffer=1.3)
             .with_gas_price("high")
             .build()
         )
         signed = wallet.sign_transaction(tx.to_dict())
-        tx_hash = chain_client.send_transaction(signed.rawTransaction)
+        tx_hash = chain_client.send_transaction(
+            signed.raw_transaction if hasattr(signed, "raw_transaction") else signed.rawTransaction
+        )
         receipt = chain_client.wait_for_receipt(tx_hash, timeout=self.config.leg2_timeout)
 
-        if not receipt or receipt.get("status") != 1:
+        if not receipt or not receipt.status:
             raise RuntimeError("DEX unwind transaction reverted")
 
         log.warning(
@@ -713,14 +916,24 @@ class Executor:
                 )
 
     def _calculate_pnl(self, ctx: ExecutionContext) -> float:
-        signal = ctx.signal
-        if signal.direction == Direction.BUY_CEX_SELL_DEX:
-            gross = (ctx.leg2_fill_price - ctx.leg1_fill_price) * ctx.leg1_fill_size
+        # Resolve which fill is CEX and which is DEX based on execution venue.
+        if ctx.leg1_venue == "cex":
+            cex_price = ctx.leg1_fill_price
+            dex_price = ctx.leg2_fill_price
         else:
-            gross = (ctx.leg1_fill_price - ctx.leg2_fill_price) * ctx.leg1_fill_size
-        trade_value = ctx.leg1_fill_size * ctx.leg1_fill_price
+            dex_price = ctx.leg1_fill_price
+            cex_price = ctx.leg2_fill_price
+        # Profit = sell_price - buy_price.
+        # BUY_DEX_SELL_CEX: buy on DEX, sell on CEX -> cex - dex
+        # BUY_CEX_SELL_DEX: buy on CEX, sell on DEX -> dex - cex
+        signal = ctx.signal
+        if signal.direction == Direction.BUY_DEX_SELL_CEX:
+            gross = (cex_price - dex_price) * ctx.leg1_fill_size
+        else:
+            gross = (dex_price - cex_price) * ctx.leg1_fill_size
+        trade_value = ctx.leg1_fill_size * max(cex_price or 0, ctx.leg1_fill_price or 0)
         if self.config.fee_structure is not None:
             fees = float(self.config.fee_structure.fee_usd(trade_value))
         else:
-            fees = trade_value * 0.004  # fallback: 10 bps CEX + 30 bps DEX estimate
+            fees = trade_value * 0.004
         return gross - fees

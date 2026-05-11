@@ -94,11 +94,18 @@ class SignalGenerator:
             cex_price = cex_bid
             dex_price = dex_buy
         else:
-            log.debug(
-                "%s no opportunity: spread_a=%.1f bps spread_b=%.1f bps",
+            log.info(
+                "REJECTED | pair=%s | reason=spread_too_small | "
+                "spread_a=%.1fbps spread_b=%.1fbps min=%.1fbps | "
+                "cex_bid=%.5f cex_ask=%.5f dex_buy=%.5f dex_sell=%.5f",
                 pair,
                 spread_a,
                 spread_b,
+                self.min_spread_bps,
+                float(cex_bid),
+                float(cex_ask),
+                float(dex_buy),
+                float(dex_sell),
             )
             return None
 
@@ -109,11 +116,16 @@ class SignalGenerator:
         net_pnl = gross_pnl - fees_usd
 
         if net_pnl < _d(self.min_profit_usd):
-            log.debug(
-                "%s net_pnl=%.2f below min_profit_usd=%.2f, skipping",
+            log.info(
+                "REJECTED | pair=%s | reason=not_profitable | "
+                "spread=%.1fbps net_pnl=$%.4f min_profit=$%.4f | "
+                "gross=$%.4f fees=$%.4f",
                 pair,
-                net_pnl,
+                spread,
+                float(net_pnl),
                 self.min_profit_usd,
+                float(gross_pnl),
+                float(fees_usd),
             )
             return None
 
@@ -138,7 +150,14 @@ class SignalGenerator:
         )
 
         self._last_signal_time[pair] = time.time()
-        log.info("Generated signal: %s", signal)
+        log.debug(
+            "Signal generated: %s | cex_bid=%.5f cex_ask=%.5f dex_buy=%.5f dex_sell=%.5f",
+            signal.pair,
+            float(cex_bid),
+            float(cex_ask),
+            float(dex_buy),
+            float(dex_sell),
+        )
         return signal
 
     def _in_cooldown(self, pair: str) -> bool:

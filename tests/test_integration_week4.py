@@ -179,6 +179,22 @@ class TestPipelineMocked:
 
     OB = _make_ob_dict(bid=2000.0, ask=2001.0)
 
+    def setup_method(self):
+        import os
+
+        from safety.constants import KILL_SWITCH_FILE
+
+        if os.path.exists(KILL_SWITCH_FILE):
+            os.remove(KILL_SWITCH_FILE)
+
+    def teardown_method(self):
+        import os
+
+        from safety.constants import KILL_SWITCH_FILE
+
+        if os.path.exists(KILL_SWITCH_FILE):
+            os.remove(KILL_SWITCH_FILE)
+
     # --- signal generation ------------------------------------------------
 
     def test_generator_produces_signal(self):

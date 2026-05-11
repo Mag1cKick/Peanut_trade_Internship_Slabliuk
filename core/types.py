@@ -238,6 +238,7 @@ class TransactionRequest:
     max_fee_per_gas: int | None = None
     max_priority_fee: int | None = None
     chain_id: int = 1
+    sender: str | None = None  # wallet address — required for estimateGas
 
     def to_dict(self) -> dict:
         """
@@ -249,6 +250,8 @@ class TransactionRequest:
             "data": self.data,
             "chainId": self.chain_id,
         }
+        if self.sender is not None:
+            tx["from"] = self.sender
         if self.nonce is not None:
             tx["nonce"] = self.nonce
         if self.gas_limit is not None:

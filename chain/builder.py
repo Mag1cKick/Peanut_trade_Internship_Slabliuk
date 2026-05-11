@@ -163,6 +163,7 @@ class TransactionBuilder:
             max_fee_per_gas=self._max_fee_per_gas,
             max_priority_fee=self._max_priority_fee,
             chain_id=self._chain_id,
+            sender=self._wallet.address,
         )
 
     def build_and_sign(self) -> SignedTransaction:
@@ -248,6 +249,7 @@ class TransactionBuilder:
             max_fee_per_gas=self._max_fee_per_gas,
             max_priority_fee=self._max_priority_fee,
             chain_id=self._chain_id,
+            sender=self._wallet.address,
         )
 
 

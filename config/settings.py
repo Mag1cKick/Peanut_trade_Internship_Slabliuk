@@ -290,10 +290,14 @@ def _fetch_from_exchange(symbol: str, exchange_client) -> TradingRules:
     limits = market.get("limits", {})
     precision = market.get("precision", {})
 
-    # ccxt normalises lot size into precision.amount (decimal places)
-    # and price tick into precision.price
-    amount_step = 10 ** (-precision.get("amount", 4))
-    price_tick = 10 ** (-precision.get("price", 2))
+    # ccxt precision can be either integer (decimal places) or float (tick size).
+    # If value < 1 it's already the tick size; otherwise it's decimal places.
+    def _to_tick(val, default):
+        v = float(val) if val is not None else default
+        return v if 0 < v < 1 else 10 ** (-int(v))
+
+    amount_step = _to_tick(precision.get("amount"), 4)
+    price_tick = _to_tick(precision.get("price"), 2)
 
     return TradingRules(
         symbol=symbol,

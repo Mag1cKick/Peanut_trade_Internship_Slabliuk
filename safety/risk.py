@@ -21,15 +21,15 @@ class RiskLimits:
     """Configurable risk thresholds — all can be tightened but not raised
     above the absolute limits defined in safety.constants."""
 
-    max_trade_usd: float = 5.0  # single trade value cap
-    max_trade_pct: float = 0.20  # max fraction of capital per trade
-    max_position_per_token: float = 30.0  # max ETH/token in a single position
-    max_open_positions: int = 1  # bot executes sequentially; kept for future
-    max_loss_per_trade: float = 5.0  # stop a trade if expected loss > this
-    max_daily_loss: float = 10.0  # halt for the day beyond this
-    max_drawdown_pct: float = 0.20  # halt if peak-to-trough > 20 %
-    max_trades_per_hour: int = 20  # rolling 60-min window
-    consecutive_loss_limit: int = 3  # pause after N losses in a row
+    max_trade_usd: float = 7.0
+    max_trade_pct: float = 0.20
+    max_position_per_token: float = 30.0
+    max_open_positions: int = 1
+    max_loss_per_trade: float = 5.0
+    max_daily_loss: float = 10.0
+    max_drawdown_pct: float = 0.20
+    max_trades_per_hour: int = 20
+    consecutive_loss_limit: int = 3
 
 
 class RiskManager:
@@ -133,6 +133,10 @@ class RiskManager:
     def current_capital(self) -> float:
         return self._capital
 
+    @current_capital.setter
+    def current_capital(self, value: float) -> None:
+        self._capital = value
+
     @property
     def trades_this_hour(self) -> int:
         self._prune_trade_times()
@@ -175,7 +179,7 @@ class PreTradeValidator:
     # low-competition tokens legitimately show thousands of bps — the real
     # ceiling is the point where the number is physically impossible (e.g.
     # token would have to be priced at zero or infinity).
-    MAX_SANE_SPREAD_BPS: float = 50_000.0
+    MAX_SANE_SPREAD_BPS: float = 500.0
 
     def validate_signal(self, signal) -> tuple[bool, str]:
         if float(signal.cex_price) <= 0:

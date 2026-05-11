@@ -13,10 +13,10 @@ import os
 # Absolute safety constants — DO NOT MODIFY THESE VALUES
 # ---------------------------------------------------------------------------
 
-ABSOLUTE_MAX_TRADE_USD = 25.0  # Hard ceiling on any single trade
-ABSOLUTE_MAX_DAILY_LOSS = 20.0  # Hard ceiling on daily loss
-ABSOLUTE_MIN_CAPITAL = 50.0  # Auto-stop if total capital < $50
-ABSOLUTE_MAX_TRADES_PER_HOUR = 30  # Prevent runaway loops
+ABSOLUTE_MAX_TRADE_USD = 25.0
+ABSOLUTE_MAX_DAILY_LOSS = 20.0
+ABSOLUTE_MIN_CAPITAL = 50.0
+ABSOLUTE_MAX_TRADES_PER_HOUR = 30
 
 # ---------------------------------------------------------------------------
 # Kill switch
