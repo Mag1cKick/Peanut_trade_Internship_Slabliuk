@@ -43,3 +43,4 @@ Thumbs.db
 
 # Bot log files
 logs/
+data/trades.db

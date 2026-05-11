@@ -65,6 +65,14 @@ class SignalQueue:
                 entry = heapq.heappop(self._heap)
                 if entry.signal.is_valid():
                     return entry.signal
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    "Signal discarded: pair=%s inventory_ok=%s within_limits=%s",
+                    entry.signal.pair,
+                    entry.signal.inventory_ok,
+                    entry.signal.within_limits,
+                )
             return None
 
     def peek_score(self) -> float | None:

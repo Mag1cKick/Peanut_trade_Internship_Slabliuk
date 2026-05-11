@@ -417,6 +417,10 @@ class TestCalculatePnl:
         ctx.leg1_fill_size = 1.0
         ctx.leg2_fill_price = 2020.0
         ctx.leg2_fill_size = 1.0
+        # Set venue so venue-aware PnL formula works correctly
+        from strategy.signal import Direction as D
+
+        ctx.leg1_venue = "cex" if direction == D.BUY_CEX_SELL_DEX else "dex"
         return ctx
 
     def test_buy_cex_sell_dex_positive(self):
@@ -430,12 +434,11 @@ class TestCalculatePnl:
     def test_buy_dex_sell_cex_positive(self):
         executor = _make_executor()
         ctx = self._make_ctx(Direction.BUY_DEX_SELL_CEX)
-        # leg1=dex_buy at 2000, leg2=cex_sell at 2020 → gross = (2000-2020)*1 = -20?
-        # Actually for BUY_DEX: leg1_fill_price is dex buy price, leg2 is cex sell price
-        # gross = (leg1 - leg2) * size = (2000 - 2020) * 1 = -20  (bad trade)
         pnl = executor._calculate_pnl(ctx)
-        gross = (ctx.leg1_fill_price - ctx.leg2_fill_price) * ctx.leg1_fill_size
-        fees = ctx.leg1_fill_size * ctx.leg1_fill_price * 0.004
+        # dex buy at 2000, cex sell at 2020: profitable trade
+        # cex_price=2020 (leg2), dex_price=2000 (leg1)
+        gross = (2020.0 - 2000.0) * 1.0
+        fees = 1.0 * 2020.0 * 0.004  # trade_value uses cex_price
         assert pnl == pytest.approx(gross - fees)
 
     def test_fees_subtracted(self):

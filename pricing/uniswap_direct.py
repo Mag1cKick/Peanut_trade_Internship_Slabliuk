@@ -105,6 +105,7 @@ ARBITRUM = NetworkConfig(
         "WBTC": DirectToken("WBTC", 8, "0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f"),
         "DAI": DirectToken("DAI", 18, "0xDA10009cBd5D07dd0CeCc66161FC93D7c9000da1"),
         "ARB": DirectToken("ARB", 18, "0x912CE59144191C1204E64559FE8253a0e49E6548"),
+        "LINK": DirectToken("LINK", 18, "0xf97f4df75117a78c1A5a0DBb814Af92458539FB4"),
         "MAGIC": DirectToken("MAGIC", 18, "0x539bdE0d7Dbd336b79148AA742883198BBF60342"),
         "PENDLE": DirectToken("PENDLE", 18, "0x0c880f6761F1af8d9Aa9C466984b80DAb9a8c9e8"),
     },
@@ -392,23 +393,92 @@ class UniswapV3Pricer:
         out = int(dex_sell * amount_in / 10**token_in.decimals * 10**token_out.decimals)
         return DirectQuote(expected_output=out)
 
+    # Quoter V1 on Arbitrum One
+    _QUOTER = "0xb27308f9F90D607463bb33eA1BeBb41C27CE5AB6"
+    _GHOST_POOL_THRESHOLD = 0.10  # reject pool if Quoter deviates >10% from slot0
+
     def get_prices_for_pair(self, pair: str, size: float = 1.0) -> tuple[float, float] | None:
         """
-        Return (dex_buy, dex_sell) spot prices from the V3 pool's sqrtPriceX96.
-        Fee is added/subtracted from the mid price to approximate fill prices.
-        Returns None if no pool found for this pair.
+        Return (dex_buy, dex_sell) prices for `size` base tokens.
+
+        1. Get slot0 spot price (fast baseline).
+        2. Validate depth with Quoter via web3.py.
+        3. If Quoter deviates >10% from slot0 — ghost pool — return None.
+        4. If Quoter matches — use Quoter price (exact fill price).
+        5. If Quoter unavailable — fall back to slot0 +/- pool fee.
         """
         base, quote = pair.split("/")
         pool, fee_tier = self._resolve_pool(base, quote)
         if pool is None:
             return None
 
-        price = self._price_from_slot0(pool, base, quote)
-        if price is None or price <= 0:
+        if base not in self.network.tokens or quote not in self.network.tokens:
             return None
 
-        fee = fee_tier / 1_000_000  # 500 → 0.0005
-        return price * (1 + fee), price * (1 - fee)
+        base_tok = self.network.tokens[base]
+        quote_tok = self.network.tokens[quote]
+        fee = fee_tier / 1_000_000
+
+        slot0 = self._price_from_slot0(pool, base, quote)
+        if slot0 is None or slot0 <= 0:
+            return None
+
+        # Quoter depth check — uses web3.py to avoid raw-HTTP response format issues
+        base_wei = int(size * 10**base_tok.decimals)
+        quoter_sell = self._quoter_sell_web3(
+            base_tok.address,
+            quote_tok.address,
+            fee_tier,
+            base_wei,
+            base_tok.decimals,
+            quote_tok.decimals,
+        )
+
+        if quoter_sell is not None and quoter_sell > 0:
+            deviation = abs(quoter_sell - slot0) / slot0
+            if deviation > self._GHOST_POOL_THRESHOLD:
+                # Stale price but no real depth — reject this pool
+                return None
+            dex_sell_price = quoter_sell
+            dex_buy_price = quoter_sell * (1 + 2 * fee)
+        else:
+            # Quoter unavailable — use slot0 with fee adjustment
+            dex_sell_price = slot0 * (1 - fee)
+            dex_buy_price = slot0 * (1 + fee)
+
+        return dex_buy_price, dex_sell_price
+
+    def _quoter_sell_web3(
+        self, token_in: str, token_out: str, fee: int, amount_in: int, dec_in: int, dec_out: int
+    ) -> float | None:
+        """
+        Call Quoter.quoteExactInputSingle via web3.py.
+        Returns effective sell price (quote per base unit), or None on failure.
+        web3.py handles the Quoter's response format correctly.
+        """
+        try:
+            from eth_abi import encode as _abi_encode
+            from web3 import Web3
+
+            w3 = Web3(Web3.HTTPProvider(self.rpc_url))
+            data = (
+                "0x"
+                + (
+                    bytes.fromhex("f7729d43")
+                    + _abi_encode(
+                        ["address", "address", "uint24", "uint256", "uint160"],
+                        [token_in, token_out, fee, amount_in, 0],
+                    )
+                ).hex()
+            )
+            result = w3.eth.call({"to": Web3.to_checksum_address(self._QUOTER), "data": data})
+            amount_out = int.from_bytes(bytes(result[:32]), "big")
+            if amount_out == 0:
+                return None
+            size = amount_in / 10**dec_in
+            return (amount_out / 10**dec_out) / size
+        except Exception:
+            return None
 
     # ------------------------------------------------------------------
     # Pool discovery
@@ -431,10 +501,15 @@ class UniswapV3Pricer:
 
         for fee in self._FEE_TIERS:
             addr = self._get_pool_from_factory(token_a, token_b, fee)
-            if addr and addr != "0x" + "0" * 40:
-                self._pool_cache[key] = f"{addr}:{fee}"
-                self._pool_cache[(quote, base)] = f"{addr}:{fee}"
-                return addr, fee
+            if not addr or addr == "0x" + "0" * 40:
+                continue
+            # Validate price before caching — skip uninitialized / ghost pools
+            price = self._price_from_slot0(addr, base, quote)
+            if price is None or price <= 0 or price > 1_000_000 or price < 1e-6:
+                continue
+            self._pool_cache[key] = f"{addr}:{fee}"
+            self._pool_cache[(quote, base)] = f"{addr}:{fee}"
+            return addr, fee
 
         return None, 0
 

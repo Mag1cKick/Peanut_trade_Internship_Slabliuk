@@ -1,0 +1,40 @@
+PREFLIGHT CHECKLIST — PeanutTrade Arb Bot
+==========================================
+Run through before each live session.
+
+ACCOUNTS
+[ ] Binance API key active (Profile -> API Management)
+[ ] Binance LINK balance >= 1.5 (enough for 1+ trade)
+[ ] Binance USDT balance visible
+[ ] Wallet address confirmed in .env (ADDR=)
+[ ] Wallet ETH balance >= 0.0005 (gas on Arbitrum One)
+[ ] Wallet USDT balance >= 15.00 (enough for 1 DEX buy)
+
+CONFIGURATION
+[ ] ARB_RPC_URL set and reachable
+[ ] PRIVATE_KEY set (new MetaMask wallet, not old compromised key)
+[ ] BINANCE_API_KEY and BINANCE_SECRET set (new keys post-Day 4)
+[ ] BINANCE_USDT_DEPOSIT_ADDRESS set
+
+KILL SWITCH
+[ ] No file at C:\arb_bot_kill (would pause trading immediately)
+[ ] Circuit breaker reset (not in cooldown from previous session)
+
+CONNECTIVITY TEST
+[ ] python scripts/check_pnl.py   -- shows live balances from both venues
+[ ] python scripts/arb_bot.py --mode prod --dry-run  -- signals generate, no trades
+
+RISK LIMITS (verify match intended day)
+[ ] --day 4: max_trade_usd=$15, max_daily_loss=$20, max_drawdown=20%
+[ ] Consecutive loss limit: 3 (pauses after 3 losses in a row)
+
+MONITORING
+[ ] Telegram bot token set (optional but useful for alerts)
+[ ] Prometheus port 8000 free (or metrics_port=0 to disable)
+
+KNOWN ISSUES / REMINDERS
+- LINK deposits to Binance: use BEP20 (BSC) network, NOT Arbitrum One
+- USDT deposits to Binance: Arbitrum One network works
+- If inventory_ok=False: buy LINK on Binance, wait 30s for auto-sync
+- If circuit breaker trips: wait 10 min or restart bot
+- Emergency liquidation: python emergency_liquidate.py --execute

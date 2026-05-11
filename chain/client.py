@@ -155,7 +155,8 @@ class ChainClient:
                 case "get_transaction":
                     return eth.get_transaction(args[0])
                 case "call":
-                    return eth.call(args[0], args[1])
+                    raw = eth.call(args[0], args[1])
+                    return raw.hex() if isinstance(raw, bytes | bytearray) else raw
                 case _:
                     raise ValueError(f"Unknown method: {method_name}")
         except ContractLogicError as exc:

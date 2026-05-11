@@ -128,19 +128,15 @@ class ExchangeClient:
         side: str,
         amount: float,
         price: float,
+        params: dict | None = None,
     ) -> dict:
         """
         Place a LIMIT IOC (Immediate Or Cancel) order.
         """
-        raw = self._call(
-            "create_order",
-            symbol,
-            "limit",
-            side,
-            amount,
-            price,
-            {"timeInForce": "IOC"},
-        )
+        order_params = {"timeInForce": "IOC"}
+        if params:
+            order_params.update(params)
+        raw = self._call("create_order", symbol, "limit", side, amount, price, order_params)
         return self._normalise_order(raw)
 
     def create_market_order(self, symbol: str, side: str, amount: float) -> dict:

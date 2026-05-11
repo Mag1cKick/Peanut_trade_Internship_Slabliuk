@@ -698,7 +698,7 @@ class TestDispatch:
         w3 = self._mock_w3()
         w3.eth.call.return_value = b"\x00" * 32
         result = client._dispatch(w3, "call", {}, "latest")
-        assert result == b"\x00" * 32
+        assert result == "0" * 64  # _dispatch hex-converts bytes via .hex()
 
     def test_unknown_method_raises(self, client):
         # ValueError from the match default case is caught by _dispatch's
